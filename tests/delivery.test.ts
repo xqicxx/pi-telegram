@@ -128,10 +128,7 @@ test("A stale runtime disposer cannot clear its replacement", async () => {
   );
   bindTelegramDeliveryRuntime(createRuntime("second", secondCalls));
   disposeFirst();
-  await sendTelegramView(
-    { text: "hello" },
-    { scope: { kind: "instance" } },
-  );
+  await sendTelegramView({ text: "hello" }, { scope: { kind: "instance" } });
   assert.deepEqual(firstCalls, []);
   assert.deepEqual(secondCalls, ["send"]);
 });
@@ -230,7 +227,8 @@ test("Delivery shutdown fences an in-flight chunk sequence and queued work", asy
   if (!inFlightResult.ok) {
     assert.equal(inFlightResult.reason, "runtime-unavailable");
   }
-  if (!queuedResult.ok) assert.equal(queuedResult.reason, "runtime-unavailable");
+  if (!queuedResult.ok)
+    assert.equal(queuedResult.reason, "runtime-unavailable");
   assert.deepEqual(transportCalls, ["send"]);
 });
 
@@ -379,7 +377,8 @@ function createConcreteRuntimeHarness(
     getActiveTurnTarget: () => target,
     getInstanceTarget: () => target,
     getAggregateTarget: () => ({ chatId: target.chatId }),
-    isExplicitTargetAuthorized: (candidate) => candidate.chatId === target.chatId,
+    isExplicitTargetAuthorized: (candidate) =>
+      candidate.chatId === target.chatId,
     renderView: (view) =>
       view.text.split("|").map((text) => ({
         text,
@@ -387,7 +386,13 @@ function createConcreteRuntimeHarness(
       })),
     async sendChunk(deliveryTarget, chunk, options) {
       nextMessageId += 1;
-      events.push({ type: "send", deliveryTarget, chunk, options, messageId: nextMessageId });
+      events.push({
+        type: "send",
+        deliveryTarget,
+        chunk,
+        options,
+        messageId: nextMessageId,
+      });
       return nextMessageId;
     },
     async editChunk(deliveryTarget, messageId, chunk, options) {
@@ -456,9 +461,7 @@ test("Bridge delivery runtime owns rendering and bus-aware transport adaptation"
       },
     },
   ]);
-  assert.deepEqual(ownership, [
-    { chatId: 42, messageId: 101, target },
-  ]);
+  assert.deepEqual(ownership, [{ chatId: 42, messageId: 101, target }]);
 });
 
 test("Bridge delivery runtime rejects work after transport generation replacement", async () => {
@@ -535,18 +538,9 @@ test("Concrete delivery runtime keeps active-turn, instance, and aggregate scope
     getAggregateTarget: () => aggregateTarget,
   });
 
-  await runtime.sendView(
-    { text: "turn" },
-    { scope: { kind: "active-turn" } },
-  );
-  await runtime.sendView(
-    { text: "instance" },
-    { scope: { kind: "instance" } },
-  );
-  await runtime.sendView(
-    { text: "all" },
-    { scope: { kind: "aggregate" } },
-  );
+  await runtime.sendView({ text: "turn" }, { scope: { kind: "active-turn" } });
+  await runtime.sendView({ text: "instance" }, { scope: { kind: "instance" } });
+  await runtime.sendView({ text: "all" }, { scope: { kind: "aggregate" } });
 
   assert.deepEqual(
     events.map((event) => event.deliveryTarget),
@@ -611,7 +605,8 @@ test("Concrete delivery runtime exposes non-idempotent commit-unknown outcomes",
   assert.deepEqual(result, {
     ok: false,
     reason: "commit-unknown",
-    message: "Telegram delivery send may have committed before transport failed.",
+    message:
+      "Telegram delivery send may have committed before transport failed.",
   });
 });
 

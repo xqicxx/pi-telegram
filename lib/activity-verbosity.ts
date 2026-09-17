@@ -211,6 +211,27 @@ export function renderTelegramToolActivityHtml(
   return tools.map(renderToolActivityHtml).join("\n\n");
 }
 
+/** One-line hint so a collapsed tool row still says what it acted on. */
+function toolActivityArgumentHint(tool: ToolActivity): string | undefined {
+  const raw = tool.args?.trim();
+  if (!raw) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return undefined;
+  }
+  const value = Object.values(parsed as Record<string, unknown>).find(
+    (candidate) => typeof candidate === "string" && candidate.trim() !== "",
+  );
+  if (typeof value !== "string") return undefined;
+  const flat = value.replace(/\s+/gu, " ").trim();
+  return flat.length > 48 ? `${flat.slice(0, 47)}…` : flat;
+}
+
 function createToolActivityDetail(
   summary: string,
   text: string,
@@ -232,8 +253,9 @@ function renderToolActivityRichBlocks(
       ? "failed"
       : "done"
     : "running";
+  // Arguments start collapsed: the row stays one line until the operator taps it.
   const evidenceBlocks: TelegramInputRichBlock[] = [
-    createToolActivityDetail("arguments", tool.args, true),
+    createToolActivityDetail("arguments", tool.args),
   ];
   tool.updates.forEach((update, index) => {
     const number = tool.droppedUpdates + index + 1;
@@ -250,6 +272,7 @@ function renderToolActivityRichBlocks(
       createToolActivityDetail(tool.isError ? "error" : "result", tool.result),
     );
   }
+  const hint = toolActivityArgumentHint(tool);
   return [
     {
       type: "details",
@@ -260,6 +283,7 @@ function renderToolActivityRichBlocks(
         },
         " ",
         { type: "code", text: status },
+        ...(hint ? ([" ", { type: "code" as const, text: hint }] as const) : []),
       ],
       blocks: evidenceBlocks,
     },

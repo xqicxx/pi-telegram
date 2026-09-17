@@ -315,6 +315,9 @@ test("tool Rich activity separates arguments, updates, and result details", () =
         { type: "bold", text: "Bash:" },
         " ",
         { type: "code", text: "done" },
+        " ",
+        // A collapsed row still names its subject (first string argument).
+        { type: "code", text: "npm test" },
       ],
       blocks: [
         {
@@ -327,7 +330,6 @@ test("tool Rich activity separates arguments, updates, and result details", () =
               language: "json",
             },
           ],
-          is_open: true,
         },
         {
           type: "details",

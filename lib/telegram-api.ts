@@ -47,7 +47,10 @@ const TELEGRAM_INBOUND_FILE_MAX_BYTES = getTelegramInboundFileByteLimitFromEnv(
 );
 
 export type TelegramNetworkFamilyPolicy =
-  "auto" | "ipv4" | "ipv6" | "ipv4-fallback";
+  | "auto"
+  | "ipv4"
+  | "ipv6"
+  | "ipv4-fallback";
 
 const TELEGRAM_NETWORK_FAMILY_ENV = "PI_TELEGRAM_NETWORK_FAMILY";
 const TELEGRAM_NETWORK_FAMILY_VALUES = new Set<TelegramNetworkFamilyPolicy>([
@@ -507,26 +510,32 @@ export interface TelegramApiClient {
 }
 
 export interface TelegramApiTargetActivityRuntime {
-  begin: (
-    method: string,
-    body: Record<string, unknown>,
-  ) => () => void;
+  begin: (method: string, body: Record<string, unknown>) => () => void;
   hasPendingTarget: (target: { chatId: number; threadId?: number }) => boolean;
   listPendingTargets: () => { chatId: number; threadId: number }[];
   listPendingChats: () => number[];
 }
 
 function parseTelegramApiTargetInteger(value: unknown): number | undefined {
-  const parsed = typeof value === "number" ? value :
-    typeof value === "string" && /^-?\d+$/u.test(value) ? Number(value) : undefined;
-  return parsed !== undefined && Number.isSafeInteger(parsed) ? parsed : undefined;
+  const parsed =
+    typeof value === "number"
+      ? value
+      : typeof value === "string" && /^-?\d+$/u.test(value)
+        ? Number(value)
+        : undefined;
+  return parsed !== undefined && Number.isSafeInteger(parsed)
+    ? parsed
+    : undefined;
 }
 
 export function createTelegramApiTargetActivityRuntime(): TelegramApiTargetActivityRuntime {
-  const pending = new Map<string, {
-    target: { chatId: number; threadId: number };
-    count: number;
-  }>();
+  const pending = new Map<
+    string,
+    {
+      target: { chatId: number; threadId: number };
+      count: number;
+    }
+  >();
   const pendingChats = new Map<number, number>();
   const messageScopedMethods = new Set([
     "deleteMessage",
@@ -539,8 +548,11 @@ export function createTelegramApiTargetActivityRuntime(): TelegramApiTargetActiv
       const chatId = parseTelegramApiTargetInteger(body.chat_id);
       const threadId = parseTelegramApiTargetInteger(body.message_thread_id);
       const messageId = parseTelegramApiTargetInteger(body.message_id);
-      const chatScoped = chatId !== undefined && threadId === undefined &&
-        messageId !== undefined && messageScopedMethods.has(method);
+      const chatScoped =
+        chatId !== undefined &&
+        threadId === undefined &&
+        messageId !== undefined &&
+        messageScopedMethods.has(method);
       if (chatId === undefined || (threadId === undefined && !chatScoped)) {
         return () => undefined;
       }
@@ -548,7 +560,11 @@ export function createTelegramApiTargetActivityRuntime(): TelegramApiTargetActiv
       if (key) {
         const existing = pending.get(key);
         if (existing) existing.count += 1;
-        else pending.set(key, { target: { chatId, threadId: threadId! }, count: 1 });
+        else
+          pending.set(key, {
+            target: { chatId, threadId: threadId! },
+            count: 1,
+          });
       } else {
         pendingChats.set(chatId, (pendingChats.get(chatId) ?? 0) + 1);
       }
@@ -568,8 +584,11 @@ export function createTelegramApiTargetActivityRuntime(): TelegramApiTargetActiv
       };
     },
     hasPendingTarget(target) {
-      return pendingChats.has(target.chatId) ||
-        (target.threadId !== undefined && pending.has(`${target.chatId}:${target.threadId}`));
+      return (
+        pendingChats.has(target.chatId) ||
+        (target.threadId !== undefined &&
+          pending.has(`${target.chatId}:${target.threadId}`))
+      );
     },
     listPendingTargets() {
       return Array.from(pending.values(), ({ target }) => ({ ...target }));
@@ -597,15 +616,19 @@ export function createTelegramApiTargetTrackingClient(
     }
   };
   return {
-    call: (method, body, options) => track(
-      method,
-      body,
-      () => client.call(method, body, options),
-    ),
+    call: (method, body, options) =>
+      track(method, body, () => client.call(method, body, options)),
     callMultipart: (method, fields, fileField, filePath, fileName, options) =>
-      track(method, fields, () => client.callMultipart(
-        method, fields, fileField, filePath, fileName, options,
-      )),
+      track(method, fields, () =>
+        client.callMultipart(
+          method,
+          fields,
+          fileField,
+          filePath,
+          fileName,
+          options,
+        ),
+      ),
     downloadFile: client.downloadFile,
     answerCallbackQuery: client.answerCallbackQuery,
     ...(client.answerGuestQuery
@@ -640,13 +663,22 @@ export interface TelegramApiWorkspaceAdmissionPort {
         resumed: boolean;
       }
     | { kind: "blocked"; reason: "retirement-fenced" };
-  releaseAdmission: (expected: TelegramApiWorkspaceAdmissionLeaseLike) => boolean;
+  releaseAdmission: (
+    expected: TelegramApiWorkspaceAdmissionLeaseLike,
+  ) => boolean;
 }
 
 export class TelegramApiWorkspaceAdmissionError extends Error {
-  readonly code: "blocked" | "unavailable" | "release-lost" | "duplicate-operation";
+  readonly code:
+    | "blocked"
+    | "unavailable"
+    | "release-lost"
+    | "duplicate-operation";
 
-  constructor(code: TelegramApiWorkspaceAdmissionError["code"], message: string) {
+  constructor(
+    code: TelegramApiWorkspaceAdmissionError["code"],
+    message: string,
+  ) {
     super(message);
     this.name = "TelegramApiWorkspaceAdmissionError";
     this.code = code;
@@ -764,8 +796,9 @@ export function createTelegramApiWorkspaceAdmissionClient(
 }
 
 export interface TelegramBridgeApiRuntimeDeps {
-  captureRequestErrorHandler?: (body: Record<string, unknown>) =>
-    ((error: unknown) => Promise<void>) | undefined;
+  captureRequestErrorHandler?: (
+    body: Record<string, unknown>,
+  ) => ((error: unknown) => Promise<void>) | undefined;
   client: TelegramApiClient;
   tempDir: string;
   maxFileSizeBytes: number;
@@ -958,8 +991,11 @@ export function getTelegramApiErrorRequestTarget(
 }
 
 export function isTelegramStaleTargetHttpError(error: unknown): boolean {
-  if (!(error instanceof TelegramApiHttpError) || error.status !== 400) return false;
-  return /^Telegram API \w+ failed: HTTP 400: Bad Request: (message thread not found|thread not found|topic not found|topic deleted|topic closed|thread closed|forum topic closed|message thread closed|topic_id_invalid|topic_closed)$/i.test(error.message);
+  if (!(error instanceof TelegramApiHttpError) || error.status !== 400)
+    return false;
+  return /^Telegram API \w+ failed: HTTP 400: Bad Request: (message thread not found|thread not found|topic not found|topic deleted|topic closed|thread closed|forum topic closed|message thread closed|topic_id_invalid|topic_closed)$/i.test(
+    error.message,
+  );
 }
 
 export function isTelegramMessageNotModifiedError(error: unknown): boolean {
@@ -1001,14 +1037,20 @@ export function isRetryableTelegramApiError(error: unknown): boolean {
 }
 
 export function getTelegramApiRetryAfterMs(error: unknown): number | undefined {
-  return error instanceof TelegramApiHttpError && error.retryAfterSeconds !== undefined
+  return error instanceof TelegramApiHttpError &&
+    error.retryAfterSeconds !== undefined
     ? Math.max(0, error.retryAfterSeconds * 1000)
     : undefined;
 }
 
 export function isTelegramMessageUnavailableError(error: unknown): boolean {
-  return error instanceof TelegramApiHttpError && error.status === 400 &&
-    /Bad Request: (message to edit not found|message not found|message_id_invalid)/iu.test(error.message);
+  return (
+    error instanceof TelegramApiHttpError &&
+    error.status === 400 &&
+    /Bad Request: (message to edit not found|message not found|message_id_invalid)/iu.test(
+      error.message,
+    )
+  );
 }
 
 function getTelegramRetryDelayMs(
@@ -1039,7 +1081,9 @@ export type TelegramApiAbortReason =
   | number
   | boolean;
 
-function getTelegramApiAbortReason(signal: AbortSignal): TelegramApiAbortReason {
+function getTelegramApiAbortReason(
+  signal: AbortSignal,
+): TelegramApiAbortReason {
   const reason: unknown = signal.reason;
   if (reason === undefined || reason === null) {
     return new DOMException("Aborted", "AbortError");
@@ -1051,10 +1095,7 @@ function throwIfTelegramApiCallAborted(signal: AbortSignal | undefined): void {
   if (signal?.aborted) throw getTelegramApiAbortReason(signal);
 }
 
-function sleepTelegramRetry(
-  ms: number,
-  signal?: AbortSignal,
-): Promise<void> {
+function sleepTelegramRetry(ms: number, signal?: AbortSignal): Promise<void> {
   if (signal?.aborted) return Promise.reject(getTelegramApiAbortReason(signal));
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
@@ -1256,7 +1297,8 @@ async function telegramHttpsFetch(
   init: RequestInit,
   family: TelegramNetworkFamily,
 ): Promise<Response> {
-  const target = typeof input === "string" || input instanceof URL ? input : input.url;
+  const target =
+    typeof input === "string" || input instanceof URL ? input : input.url;
   let url: URL;
   try {
     url = new URL(target);
@@ -1325,11 +1367,11 @@ const TELEGRAM_API_FETCH_HOSTS = new Set(["api.telegram.org"]);
  * Only Telegram API and file hosts may be fetched while a bot token is in
  * scope; anything else is refused instead of following the caller input.
  */
-function resolveTelegramApiFetchTarget(
-  input: string | URL | Request,
-): URL {
+function resolveTelegramApiFetchTarget(input: string | URL | Request): URL {
   const target =
-    typeof input === "string" || input instanceof URL ? String(input) : input.url;
+    typeof input === "string" || input instanceof URL
+      ? String(input)
+      : input.url;
   let url: URL;
   try {
     url = new URL(target);
@@ -1575,7 +1617,10 @@ export async function cleanupTelegramTempFiles(
     return 0;
   }
   for (const entry of entries) {
-    if (!entry.isFile() || !TELEGRAM_TEMP_SCRATCH_FILE_PATTERN.test(entry.name)) {
+    if (
+      !entry.isFile() ||
+      !TELEGRAM_TEMP_SCRATCH_FILE_PATTERN.test(entry.name)
+    ) {
       continue;
     }
     const path = join(tempDir, entry.name);
@@ -1896,18 +1941,25 @@ export function createDefaultTelegramBridgeApiRuntime(deps: {
     recordRuntimeEvent: deps.recordRuntimeEvent,
   });
   const admittedClient = deps.workspaceAdmission
-    ? createTelegramApiWorkspaceAdmissionClient(client, deps.workspaceAdmission, {
-        onReleaseError(error, method) {
-          deps.recordRuntimeEvent("api", error, {
-            phase: "workspace-admission-release",
-            method,
-          });
+    ? createTelegramApiWorkspaceAdmissionClient(
+        client,
+        deps.workspaceAdmission,
+        {
+          onReleaseError(error, method) {
+            deps.recordRuntimeEvent("api", error, {
+              phase: "workspace-admission-release",
+              method,
+            });
+          },
         },
-      })
+      )
     : client;
   return createTelegramBridgeApiRuntime({
     client: deps.targetActivity
-      ? createTelegramApiTargetTrackingClient(admittedClient, deps.targetActivity)
+      ? createTelegramApiTargetTrackingClient(
+          admittedClient,
+          deps.targetActivity,
+        )
       : admittedClient,
     tempDir: getTelegramApiTempDir(),
     maxFileSizeBytes: TELEGRAM_INBOUND_FILE_MAX_BYTES,
@@ -1927,7 +1979,9 @@ export function createTelegramBridgeApiRuntime(
     try {
       await handler?.(error);
     } catch (recoveryError) {
-      deps.recordRuntimeEvent("api", recoveryError, { phase: "stale-target-recovery" });
+      deps.recordRuntimeEvent("api", recoveryError, {
+        phase: "stale-target-recovery",
+      });
     }
   };
   const now = deps.now ?? Date.now;
@@ -1976,7 +2030,8 @@ export function createTelegramBridgeApiRuntime(
       }
       let gate = chatActionGates.get(chatActionKey);
       if (!gate) {
-        if (chatActionGates.size >= chatActionMaxGates) return true as TResponse;
+        if (chatActionGates.size >= chatActionMaxGates)
+          return true as TResponse;
         gate = { notBeforeMs: 0 };
         chatActionGates.set(chatActionKey, gate);
       }
@@ -2030,9 +2085,13 @@ export function createTelegramBridgeApiRuntime(
       return await deps.client.call<TResponse>(method, body, options);
     } catch (error) {
       await recoverRequestError(recoverError, error);
-      if (method === "deleteMessage" && error instanceof TelegramApiHttpError &&
-        error.status === 400 && error.message ===
-          "Telegram API deleteMessage failed: HTTP 400: Bad Request: message to delete not found") {
+      if (
+        method === "deleteMessage" &&
+        error instanceof TelegramApiHttpError &&
+        error.status === 400 &&
+        error.message ===
+          "Telegram API deleteMessage failed: HTTP 400: Bad Request: message to delete not found"
+      ) {
         return true as TResponse;
       }
       deps.recordRuntimeEvent(
@@ -2263,16 +2322,19 @@ export function createTelegramApiClient(
       const token = getBotToken();
       // Cooldown keys retain only the public bot-id prefix, not the credential.
       const botId = token?.match(/^(\d+):/)?.[1];
-      const isDraft = method === "sendMessageDraft" || method === "sendRichMessageDraft";
-      const draftKey = isDraft && botId
-        ? `${botId}:${String(body.chat_id)}:${String(body.message_thread_id ?? "all")}`
-        : undefined;
+      const isDraft =
+        method === "sendMessageDraft" || method === "sendRichMessageDraft";
+      const draftKey =
+        isDraft && botId
+          ? `${botId}:${String(body.chat_id)}:${String(body.message_thread_id ?? "all")}`
+          : undefined;
       if (draftKey) {
         const nowMs = now();
         for (const [key, deadline] of draftRetryNotBeforeByTarget) {
           if (nowMs >= deadline) draftRetryNotBeforeByTarget.delete(key);
         }
-        if (draftRetryNotBeforeByTarget.has(draftKey)) return false as TResponse;
+        if (draftRetryNotBeforeByTarget.has(draftKey))
+          return false as TResponse;
       }
       try {
         // A draft is a replaceable snapshot, not a body to replay after backoff.
@@ -2303,10 +2365,18 @@ export function createTelegramApiClient(
         });
       } catch (error) {
         if (draftKey && isRetryableTelegramApiError(error)) {
-          draftRetryNotBeforeByTarget.set(draftKey, Math.max(
-            draftRetryNotBeforeByTarget.get(draftKey) ?? 0,
-            now() + getTelegramRetryDelayMs(error, 0, options?.retryBaseDelayMs ?? 500),
-          ));
+          draftRetryNotBeforeByTarget.set(
+            draftKey,
+            Math.max(
+              draftRetryNotBeforeByTarget.get(draftKey) ?? 0,
+              now() +
+                getTelegramRetryDelayMs(
+                  error,
+                  0,
+                  options?.retryBaseDelayMs ?? 500,
+                ),
+            ),
+          );
         }
         throw error;
       }

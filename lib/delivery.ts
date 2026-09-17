@@ -397,9 +397,9 @@ export function isTelegramDeliveryExplicitTargetAuthorized(
   ) {
     return true;
   }
-  return (view.liveTargets ?? []).some(function (target) {
-    return areDeliveryTargetsEqual(candidate, target);
-  });
+  return (view.liveTargets ?? []).some((target) =>
+    areDeliveryTargetsEqual(candidate, target),
+  );
 }
 
 function areDeliveryTargetsEqual(
@@ -776,12 +776,13 @@ export function createTelegramBridgeDeliveryRuntime(
       }
       return renderTelegramMessage(view.text, {
         mode: view.parseMode ?? "plain",
-      }).map(function (chunk) {
-        return {
-          text: chunk.text,
-          parseMode: chunk.parseMode === "HTML" ? "html" : "plain",
-        } as const;
-      });
+      }).map(
+        (chunk) =>
+          ({
+            text: chunk.text,
+            parseMode: chunk.parseMode === "HTML" ? "html" : "plain",
+          }) as const,
+      );
     },
     async sendChunk(target, chunk, options) {
       assertTransportActive();
