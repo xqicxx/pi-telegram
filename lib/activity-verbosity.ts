@@ -356,7 +356,8 @@ export function renderTelegramThinkingRichBlocks(
   if (preview) blocks.push({ type: "paragraph", text: preview });
   blocks.push({
     type: "details",
-    summary: chars ? `展开全文 · ${chars}` : "展开全文",
+    // Size lives on the headline only — repeating it here read as a duplicate.
+    summary: "展开全文",
     blocks: [{ type: "paragraph", text }],
   });
   return blocks;

@@ -597,7 +597,7 @@ test("reasoning uses a persistent collapsed disclosure message", async () => {
   assert.equal(harness.edits[0]?.text, undefined);
   const digest = JSON.stringify(harness.edits[1]?.rich_message);
   assert.match(digest, /🧠 Thought for/);
-  assert.match(digest, /展开全文 · 18 字/);
+  assert.match(digest, /展开全文/);
   assert.doesNotMatch(digest, /🧠 Thinking…/);
   assert.deepEqual(harness.edits[0]?.rich_message?.blocks, [
     {
@@ -611,7 +611,7 @@ test("reasoning uses a persistent collapsed disclosure message", async () => {
     { type: "paragraph", text: "Checking **state**" },
     {
       type: "details",
-      summary: "展开全文 · 18 字",
+      summary: "展开全文",
       blocks: [{ type: "paragraph", text: "Checking **state**" }],
     },
   ]);
@@ -638,7 +638,7 @@ test("agent end folds the thinking card the reader may have opened", async () =>
   const fold = harness.edits[0];
   assert.equal(fold?.text, undefined);
   assert.match(JSON.stringify(fold?.rich_message), /still thinking/);
-  assert.match(JSON.stringify(fold?.rich_message), /展开全文 · 14 字/);
+  assert.match(JSON.stringify(fold?.rich_message), /展开全文/);
 });
 
 test("agent start refreshes file-backed mode before activity isolation", async () => {
@@ -749,7 +749,7 @@ test("turn-end digest folds the card and reports size, duration, and tools", () 
       },
       {
         type: "details",
-        summary: "展开全文 · 1,234 字",
+        summary: "展开全文",
         blocks: [{ type: "paragraph", text: "body" }],
       },
     ],
