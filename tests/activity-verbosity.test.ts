@@ -801,7 +801,9 @@ test("a 收起 request folds the card through the live runtime", async () => {
     {
       type: "buttons",
       align: "center",
-      buttons: [{ text: "收起", callback_data: `think:fold:${messageId}` }],
+      buttons: [
+        { text: "收起", style: "primary", callback_data: `think:fold:${messageId}` },
+      ],
     },
   );
 

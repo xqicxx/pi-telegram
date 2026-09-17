@@ -31,9 +31,7 @@ export const TELEGRAM_REASONING_BUFFER_MAX_CHARS = 16_000;
  * reasoning instead of a 3900 char tail.
  */
 const TELEGRAM_REASONING_MESSAGE_MAX_CHARS = 16_000;
-// Telegram throttles edits per chat, so a user tap queues behind these frames.
-// Refreshing a one-line preview less often keeps that queue short.
-export const TELEGRAM_REASONING_MIN_INTERVAL_MS = 3_000;
+export const TELEGRAM_REASONING_MIN_INTERVAL_MS = 1_200;
 export const TELEGRAM_TOOL_UPDATE_MAX_ENTRIES = 4;
 
 interface ToolActivity {
@@ -319,6 +317,7 @@ export interface TelegramThinkingCardState {
   finished?: boolean;
   /** When set, the card carries an in-bubble 收起 button for that message. */
   foldMessageId?: number;
+  foldHighlighted?: boolean;
 }
 
 const formatThinkingChars = (chars: number): string =>
@@ -363,7 +362,9 @@ export function renderTelegramThinkingRichBlocks(
     // The closer lives *inside* the body: Telegram reports no expand event, so
     // nesting is what makes it appear only once the reader opens the card — and
     // vanish again with the body when the card folds.
-    body.push(thinkingFoldButtonBlock(state.foldMessageId));
+    body.push(
+      thinkingFoldButtonBlock(state.foldMessageId, state.foldHighlighted),
+    );
   }
   blocks.push({
     type: "details",
@@ -401,18 +402,30 @@ export function thinkingFoldKeyboard(messageId: number): {
  * who scrolled to the end of the text still has to travel back; the Bot API
  * `buttons` block puts the control at the end of the card itself.
  */
-function thinkingFoldButtonBlock(messageId: number): TelegramInputRichBlock {
+function thinkingFoldButtonBlock(
+  messageId: number,
+  highlighted = false,
+): TelegramInputRichBlock {
   return {
     type: "buttons",
     align: "center",
     buttons: [
       {
         text: "收起",
+        ...(highlighted ? { style: "primary" as const } : {}),
         callback_data: `${TELEGRAM_THINKING_FOLD_CALLBACK_PREFIX}${messageId}`,
       },
     ],
   };
 }
+
+/**
+ * Taps alternate the button style. Telegram answers an identical payload with
+ * "message is not modified", and a card the reader just expanded already holds
+ * the folded payload — so the fold has to differ to be accepted at all, and a
+ * changed payload is also what drops the client's expanded state.
+ */
+const thinkingFoldTaps = new Map<number, number>();
 
 export interface TelegramThinkingCardFold {
   messageId: number;
@@ -702,7 +715,10 @@ export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
     }
   };
   /** Rewrite a thinking card as its one-line digest, with the closer button. */
-  const applyThinkingFold = async (entry: TelegramThinkingCardFold) => {
+  const applyThinkingFold = async (
+    entry: TelegramThinkingCardFold,
+    highlighted = false,
+  ) => {
     await deps.editMessageText({
       chat_id: entry.target.chatId,
       message_id: entry.messageId,
@@ -714,6 +730,7 @@ export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
           durationMs: entry.durationMs,
           finished: true,
           foldMessageId: entry.messageId,
+          foldHighlighted: highlighted,
         }),
       ),
     });
@@ -738,7 +755,9 @@ export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
     async (chatId, messageId) => {
       const entry = thinkingCards.get(messageId);
       if (!entry || entry.target.chatId !== chatId) return false;
-      await applyThinkingFold(entry);
+      const taps = (thinkingFoldTaps.get(messageId) ?? 0) + 1;
+      thinkingFoldTaps.set(messageId, taps);
+      await applyThinkingFold(entry, taps % 2 === 1);
       return true;
     },
   );
@@ -897,7 +916,7 @@ export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
         (reasoningMessageFrames === 0 ||
           (getNowMs() - lastReasoningPublishMs >=
             TELEGRAM_REASONING_MIN_INTERVAL_MS &&
-            reasoningChars - lastReasoningMessageChars >= 400))
+            reasoningChars - lastReasoningMessageChars >= 160))
       ) {
         await publishReasoning(event, acceptedGeneration);
       }
