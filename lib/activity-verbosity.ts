@@ -293,8 +293,8 @@ function isKnownSafeRichActivityRejection(error: unknown): boolean {
   );
 }
 
-/** Chars of reasoning shown as one line under the label. */
-export const TELEGRAM_THINKING_PREVIEW_MAX_CHARS = 90;
+/** Chars of reasoning shown on the live thinking line. */
+export const TELEGRAM_THINKING_PREVIEW_MAX_CHARS = 60;
 
 /**
  * One line of the newest reasoning, so the collapsed card stays three rows tall
@@ -310,34 +310,52 @@ export function thinkingActivityPreview(text: string): string | undefined {
 }
 
 /**
- * Thinking message: a label line, one line of live preview, then a collapsed
- * body. The label on its own line is what separates reasoning from the tool
- * card — tool rows are collapsed disclosures led by the tool name, so a
- * thinking row shaped the same way reads as one more tool call.
+ * Thinking message: one live line (label, size, newest text) plus the full
+ * reasoning behind a disclosure. Keeping the card to a single row is what
+ * separates reasoning from the tool card — tool rows are collapsed disclosures
+ * led by the tool name, so a thinking row shaped the same way reads as one more
+ * tool call.
  */
 export function renderTelegramThinkingRichBlocks(
   text: string,
+  options: { chars?: number; folded?: boolean } = {},
 ): TelegramInputRichBlock[] {
   const preview = thinkingActivityPreview(text);
+  const size = options.chars && options.chars > 0 ? options.chars : undefined;
   return [
-    { type: "paragraph", text: [{ type: "bold", text: "🧠 Thinking" }] },
-    ...(preview ? [{ type: "paragraph" as const, text: preview }] : []),
+    {
+      type: "paragraph",
+      text: [
+        { type: "bold", text: "🧠 Thinking…" },
+        ...(size
+          ? ([" ", { type: "code" as const, text: `${size} 字` }] as const)
+          : []),
+        ...(preview ? ([" ", preview] as const) : []),
+      ],
+    },
     {
       type: "details",
-      summary: "展开全文",
+      summary: size && options.folded ? `展开全文 · ${size} 字` : "展开全文",
       blocks: [{ type: "paragraph", text }],
     },
   ];
 }
 
+/** Turn-end rewrite: same body, summary gains the size so clients re-render
+ * collapsed instead of staying open where the reader scrolled. */
+export function renderTelegramThinkingFoldBlocks(
+  text: string,
+  chars: number,
+): TelegramInputRichBlock[] {
+  return renderTelegramThinkingRichBlocks(text, { chars, folded: true });
+}
+
 /** Reasoning body for one message: the whole buffer, or its bounded tail. */
 function buildTelegramThinkingRichMessage(
   text: string,
+  blocks: TelegramInputRichBlock[] = renderTelegramThinkingRichBlocks(text),
 ): TelegramInputRichMessage {
-  return {
-    blocks: renderTelegramThinkingRichBlocks(text),
-    skip_entity_detection: true,
-  };
+  return { blocks, skip_entity_detection: true };
 }
 
 export interface TelegramActivityVerbosityRuntime {
@@ -393,6 +411,7 @@ export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
       | "config-refresh"
       | "reasoning-send"
       | "reasoning-edit"
+      | "reasoning-fold"
       | "tool-send"
       | "tool-edit",
     event: TelegramActivityEvent,
@@ -411,6 +430,15 @@ export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
   let reasoningMessageFrames = 0;
   let lastReasoningMessageChars = 0;
   let reasoningMessage: ReasoningMessage | undefined;
+  /** Last published thinking card, re-written collapsed when the turn ends. */
+  let reasoningFold:
+    | {
+        messageId: number;
+        target: TelegramTarget;
+        text: string;
+        chars: number;
+      }
+    | undefined;
   let reasoningBlocked = false;
   let lastReasoningPublishMs = 0;
   let toolMessage: ToolMessage | undefined;
@@ -426,6 +454,7 @@ export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
     reasoningMessageFrames = 0;
     lastReasoningMessageChars = 0;
     reasoningMessage = undefined;
+    reasoningFold = undefined;
     reasoningBlocked = false;
     lastReasoningPublishMs = 0;
     toolMessage = undefined;
@@ -472,13 +501,18 @@ export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
       return;
     }
     let retained = reasoningBuffer;
+    let publishedText = retained;
     let message = buildTelegramThinkingRichMessage(retained);
     do {
       const omitted = reasoningChars - retained.length;
       const text = redactActivityText(
         omitted > 0 ? `…\n${retained}` : retained,
       );
-      message = buildTelegramThinkingRichMessage(text);
+      publishedText = text;
+      message = buildTelegramThinkingRichMessage(
+        text,
+        renderTelegramThinkingRichBlocks(text, { chars: reasoningChars }),
+      );
       if (text.length <= TELEGRAM_REASONING_MESSAGE_MAX_CHARS) break;
       retained = retained.slice(
         -Math.max(1, Math.floor(retained.length * 0.75)),
@@ -512,6 +546,14 @@ export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
       reasoningMessageFrames += 1;
       lastReasoningMessageChars = reasoningChars;
       lastReasoningPublishMs = getNowMs();
+      if (reasoningMessage) {
+        reasoningFold = {
+          messageId: reasoningMessage.messageId,
+          target: { ...reasoningMessage.target },
+          text: publishedText,
+          chars: reasoningChars,
+        };
+      }
     } catch (error) {
       if (!isCurrent(acceptedGeneration, admittedAuthority)) return;
       reasoningBlocked = true;
@@ -750,6 +792,26 @@ export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
         !reasoningBlocked
       ) {
         await publishReasoning(event, acceptedGeneration);
+      }
+      if (!isCurrent(acceptedGeneration, admittedAuthority)) return;
+      const fold = reasoningFold;
+      reasoningFold = undefined;
+      if (fold) {
+        // The reader scrolled to the end of an open card; rewriting it here is
+        // what folds it without them scrolling back to the summary row.
+        try {
+          await deps.editMessageText({
+            chat_id: fold.target.chatId,
+            message_id: fold.messageId,
+            rich_message: buildTelegramThinkingRichMessage(
+              fold.text,
+              renderTelegramThinkingFoldBlocks(fold.text, fold.chars),
+            ),
+          });
+        } catch (error) {
+          if (!isCurrent(acceptedGeneration, admittedAuthority)) return;
+          deps.recordFailure?.("reasoning-fold", event, error);
+        }
       }
       if (!isCurrent(acceptedGeneration, admittedAuthority)) return;
       clearActivity();

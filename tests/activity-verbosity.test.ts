@@ -8,6 +8,7 @@ import test from "node:test";
 import {
   createTelegramActivityVerbosityBinding,
   createTelegramActivityVerbosityRuntime,
+  renderTelegramThinkingFoldBlocks,
   renderTelegramThinkingRichBlocks,
   renderTelegramToolActivityHtml,
   renderTelegramToolActivityRichMessage,
@@ -592,8 +593,16 @@ test("reasoning uses a persistent collapsed disclosure message", async () => {
   assert.equal(harness.edits.length, 1);
   assert.equal(harness.edits[0]?.text, undefined);
   assert.deepEqual(harness.edits[0]?.rich_message?.blocks, [
-    { type: "paragraph", text: [{ type: "bold", text: "🧠 Thinking" }] },
-    { type: "paragraph", text: "Checking **state**" },
+    {
+      type: "paragraph",
+      text: [
+        { type: "bold", text: "🧠 Thinking…" },
+        " ",
+        { type: "code", text: "18 字" },
+        " ",
+        "Checking **state**",
+      ],
+    },
     {
       type: "details",
       summary: "展开全文",
@@ -602,7 +611,7 @@ test("reasoning uses a persistent collapsed disclosure message", async () => {
   ]);
 });
 
-test("agent end leaves an already current thinking message unchanged", async () => {
+test("agent end folds the thinking card the reader may have opened", async () => {
   const harness = createHarness({ mode: "thinking" });
   harness.runtime.accept(event(1, { type: "agent-start" }));
   harness.runtime.accept(
@@ -615,10 +624,15 @@ test("agent end leaves an already current thinking message unchanged", async () 
   harness.runtime.accept(event(3, { type: "agent-end" }));
   await harness.runtime.waitForIdle();
   assert.equal(harness.richSends.length, 1);
-  assert.equal(harness.edits.length, 0);
+  assert.equal(harness.edits.length, 1);
   const serialized = JSON.stringify(harness.richSends[0]?.rich_message);
   assert.match(serialized, /🧠 Thinking/);
   assert.match(serialized, /still thinking/);
+
+  const fold = harness.edits[0];
+  assert.equal(fold?.text, undefined);
+  assert.match(JSON.stringify(fold?.rich_message), /still thinking/);
+  assert.match(JSON.stringify(fold?.rich_message), /展开全文 · 14 字/);
 });
 
 test("agent start refreshes file-backed mode before activity isolation", async () => {
@@ -695,15 +709,38 @@ test("thinking and tools modes isolate their activity classes", async () => {
 test("reasoning keeps its label on its own line above a collapsed body", () => {
   const text = "**Reviewing data models**\na < b\n<https://example.com>";
   assert.deepEqual(renderTelegramThinkingRichBlocks(text), [
-    { type: "paragraph", text: [{ type: "bold", text: "🧠 Thinking" }] },
     {
       type: "paragraph",
-      text: "**Reviewing data models** a < b <https://example.com>",
+      text: [
+        { type: "bold", text: "🧠 Thinking…" },
+        " ",
+        "**Reviewing data models** a < b <https://example.com>",
+      ],
     },
     {
       type: "details",
       summary: "展开全文",
       blocks: [{ type: "paragraph", text }],
+    },
+  ]);
+});
+
+test("turn-end fold adds the size to the summary so clients re-render closed", () => {
+  assert.deepEqual(renderTelegramThinkingFoldBlocks("body", 1234), [
+    {
+      type: "paragraph",
+      text: [
+        { type: "bold", text: "🧠 Thinking…" },
+        " ",
+        { type: "code", text: "1234 字" },
+        " ",
+        "body",
+      ],
+    },
+    {
+      type: "details",
+      summary: "展开全文 · 1234 字",
+      blocks: [{ type: "paragraph", text: "body" }],
     },
   ]);
 });
