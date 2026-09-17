@@ -613,14 +613,12 @@ test("reasoning uses a persistent collapsed disclosure message", async () => {
     {
       type: "details",
       summary: "展开全文",
-      blocks: [{ type: "paragraph", text: "Checking **state**" }],
+      blocks: [{ type: "pre", text: "Checking **state**" }],
     },
   ]);
   // The closer is a keyboard row: a single button spans the bubble width.
   assert.deepEqual(harness.edits[0]?.reply_markup, {
-    inline_keyboard: [
-      [{ text: "收起", callback_data: "think:fold:101" }],
-    ],
+    inline_keyboard: [[{ text: "收起", callback_data: "think:fold:101" }]],
   });
 });
 
@@ -647,9 +645,7 @@ test("agent end folds the thinking card the reader may have opened", async () =>
   assert.match(JSON.stringify(fold?.rich_message), /still thinking/);
   assert.match(JSON.stringify(fold?.rich_message), /展开全文/);
   assert.deepEqual(fold?.reply_markup, {
-    inline_keyboard: [
-      [{ text: "收起", callback_data: "think:fold:101" }],
-    ],
+    inline_keyboard: [[{ text: "收起", callback_data: "think:fold:101" }]],
   });
 });
 
@@ -735,7 +731,7 @@ test("reasoning keeps its label on its own line above a collapsed body", () => {
     {
       type: "details",
       summary: "展开全文",
-      blocks: [{ type: "paragraph", text }],
+      blocks: [{ type: "pre", text }],
     },
   ]);
 });
@@ -762,7 +758,7 @@ test("turn-end digest folds the card and reports size, duration, and tools", () 
       {
         type: "details",
         summary: "展开全文",
-        blocks: [{ type: "paragraph", text: "body" }],
+        blocks: [{ type: "pre", text: "body" }],
       },
     ],
   );
@@ -787,7 +783,9 @@ test("a 收起 request folds the card through the live runtime", async () => {
   assert.match(JSON.stringify(fold?.rich_message), /🧠 Thought for/);
   // First tap alternates the label so the edit is not rejected as unchanged.
   assert.deepEqual(fold?.reply_markup, {
-    inline_keyboard: [[{ text: "收起 ", callback_data: `think:fold:${messageId}` }]],
+    inline_keyboard: [
+      [{ text: "收起 ", callback_data: `think:fold:${messageId}` }],
+    ],
   });
 
   // A tap from another chat must not fold someone else's card.

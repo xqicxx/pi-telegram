@@ -358,7 +358,9 @@ export function renderTelegramThinkingRichBlocks(
     type: "details",
     // Size lives on the headline only — repeating it here read as a duplicate.
     summary: "展开全文",
-    blocks: [{ type: "paragraph", text }],
+    // Monospace box: raw reasoning is not prose, and the code block keeps its
+    // markers, indentation, and line breaks from turning into a text wall.
+    blocks: [{ type: "pre", text }],
   });
   return blocks;
 }
