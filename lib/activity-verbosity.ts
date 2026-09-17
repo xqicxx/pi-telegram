@@ -315,6 +315,8 @@ export interface TelegramThinkingCardState {
   tools?: number;
   durationMs?: number;
   finished?: boolean;
+  /** When set, the card carries an in-bubble 收起 button for that message. */
+  foldMessageId?: number;
 }
 
 const formatThinkingChars = (chars: number): string =>
@@ -360,6 +362,9 @@ export function renderTelegramThinkingRichBlocks(
     summary: "展开全文",
     blocks: [{ type: "paragraph", text }],
   });
+  if (state.foldMessageId !== undefined) {
+    blocks.push(thinkingFoldButtonBlock(state.foldMessageId));
+  }
   return blocks;
 }
 
@@ -381,6 +386,24 @@ export function thinkingFoldKeyboard(messageId: number): {
           callback_data: `${TELEGRAM_THINKING_FOLD_CALLBACK_PREFIX}${messageId}`,
         },
       ],
+    ],
+  };
+}
+
+/**
+ * In-bubble closer. A reply keyboard renders *below* the bubble, so the reader
+ * who scrolled to the end of the text still has to travel back; the Bot API
+ * `buttons` block puts the control at the end of the card itself.
+ */
+function thinkingFoldButtonBlock(messageId: number): TelegramInputRichBlock {
+  return {
+    type: "buttons",
+    align: "center",
+    buttons: [
+      {
+        text: "收起",
+        callback_data: `${TELEGRAM_THINKING_FOLD_CALLBACK_PREFIX}${messageId}`,
+      },
     ],
   };
 }
@@ -605,7 +628,10 @@ export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
       publishedText = text;
       message = buildTelegramThinkingRichMessage(
         text,
-        renderTelegramThinkingRichBlocks(text, { chars: reasoningChars }),
+        renderTelegramThinkingRichBlocks(text, {
+          chars: reasoningChars,
+          foldMessageId: reasoningMessage?.messageId,
+        }),
       );
       if (text.length <= TELEGRAM_REASONING_MESSAGE_MAX_CHARS) break;
       retained = retained.slice(
@@ -681,9 +707,9 @@ export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
           tools: entry.tools,
           durationMs: entry.durationMs,
           finished: true,
+          foldMessageId: entry.messageId,
         }),
       ),
-      reply_markup: thinkingFoldKeyboard(entry.messageId),
     });
   };
 

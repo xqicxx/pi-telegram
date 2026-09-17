@@ -303,7 +303,20 @@ export type TelegramInputRichTableCell = {
   valign?: "top" | "middle" | "bottom";
 };
 
+/** Button inside a rich message bubble (Bot API `InputRichBlockButtons`). */
+export type TelegramInputRichMessageButton = {
+  text: TelegramRichText;
+  style?: "danger" | "success" | "primary" | "link";
+  url?: string;
+  callback_data?: string;
+};
+
 export type TelegramInputRichBlock =
+  | {
+      type: "buttons";
+      buttons: TelegramInputRichMessageButton[];
+      align?: "left" | "center" | "right";
+    }
   | { type: "heading"; text: TelegramRichText; size?: 1 | 2 | 3 }
   | { type: "pre"; text: TelegramRichText; language?: string }
   | { type: "paragraph"; text: TelegramRichText }

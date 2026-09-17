@@ -615,6 +615,11 @@ test("reasoning uses a persistent collapsed disclosure message", async () => {
       summary: "展开全文",
       blocks: [{ type: "paragraph", text: "Checking **state**" }],
     },
+    {
+      type: "buttons",
+      align: "center",
+      buttons: [{ text: "收起", callback_data: "think:fold:101" }],
+    },
   ]);
 });
 
@@ -640,6 +645,11 @@ test("agent end folds the thinking card the reader may have opened", async () =>
   assert.equal(fold?.text, undefined);
   assert.match(JSON.stringify(fold?.rich_message), /still thinking/);
   assert.match(JSON.stringify(fold?.rich_message), /展开全文/);
+  assert.deepEqual(fold?.rich_message?.blocks?.at(-1), {
+    type: "buttons",
+    align: "center",
+    buttons: [{ text: "收起", callback_data: "think:fold:101" }],
+  });
 });
 
 test("agent start refreshes file-backed mode before activity isolation", async () => {
@@ -774,11 +784,11 @@ test("a 收起 request folds the card through the live runtime", async () => {
   assert.equal(await requestTelegramThinkingFold(42, messageId), true);
   const fold = harness.edits.at(-1);
   assert.match(JSON.stringify(fold?.rich_message), /🧠 Thought for/);
-  assert.equal(
-    (fold?.reply_markup as { inline_keyboard: Array<Array<{ text: string }>> })
-      .inline_keyboard[0]?.[0]?.text,
-    "收起",
-  );
+  assert.deepEqual(fold?.rich_message?.blocks?.at(-1), {
+    type: "buttons",
+    align: "center",
+    buttons: [{ text: "收起", callback_data: `think:fold:${messageId}` }],
+  });
 
   // A tap from another chat must not fold someone else's card.
   assert.equal(await requestTelegramThinkingFold(7, messageId), false);
