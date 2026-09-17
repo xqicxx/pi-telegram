@@ -427,6 +427,9 @@ function thinkingFoldButtonBlock(
  */
 const thinkingFoldTaps = new Map<number, number>();
 
+/** Cards whose reader asked to fold: further stream frames are pointless. */
+const thinkingFoldRequested = new Set<number>();
+
 export interface TelegramThinkingCardFold {
   messageId: number;
   target: TelegramTarget;
@@ -589,6 +592,7 @@ export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
     lastReasoningMessageChars = 0;
     reasoningMessage = undefined;
     reasoningFolds = [];
+    thinkingFoldRequested.clear();
     turnToolCount = 0;
     reasoningStartedMs = undefined;
     reasoningBlocked = false;
@@ -633,6 +637,12 @@ export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
       !isCurrent(acceptedGeneration, admittedAuthority) ||
       !target ||
       reasoningBlocked
+    ) {
+      return;
+    }
+    if (
+      reasoningMessage &&
+      thinkingFoldRequested.has(reasoningMessage.messageId)
     ) {
       return;
     }
@@ -757,6 +767,9 @@ export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
       if (!entry || entry.target.chatId !== chatId) return false;
       const taps = (thinkingFoldTaps.get(messageId) ?? 0) + 1;
       thinkingFoldTaps.set(messageId, taps);
+      // Stop feeding the chat: at Telegram's per-chat edit throttle every new
+      // frame queues in front of the fold the reader just asked for.
+      thinkingFoldRequested.add(messageId);
       await applyThinkingFold(entry, taps % 2 === 1);
       return true;
     },
