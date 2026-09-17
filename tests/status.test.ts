@@ -1351,7 +1351,7 @@ test("Status HTML separates token and cache telemetry", () => {
 
   assert.match(
     html,
-    /<b>Tokens:<\/b> <code>↑250 ↓50<\/code>\n<b>Cache:<\/b> <code>R1\.7k W50 CH80\.0%<\/code>\n<b>Context:<\/b>/s,
+    /<b>Context:<\/b>[\s\S]*<blockquote expandable><b>Tokens:<\/b> <code>↑250 ↓50<\/code>\n<b>Cache:<\/b> <code>R1\.7k W50 CH80\.0%<\/code>/s,
   );
 });
 

@@ -1600,6 +1600,9 @@ export function buildStatusHtml(
   const usesSubscription = activeModel
     ? ctx.modelRegistry.isUsingOAuth(activeModel)
     : false;
+  // Numeric detail rows fold into one collapsible block so the card opens as
+  // a short summary and the token/cost numbers stay one tap away.
+  const detailLines: string[] = [];
   const lines: string[] = [
     buildStatusRow(
       "Status",
@@ -1610,17 +1613,20 @@ export function buildStatusHtml(
   const cacheSummary = buildCacheSummary(stats);
   const costSummary = buildCostSummary(stats, usesSubscription);
   if (usageSummary) {
-    lines.push(buildStatusRow("Tokens", usageSummary));
+    detailLines.push(buildStatusRow("Tokens", usageSummary));
   }
   if (cacheSummary) {
-    lines.push(buildStatusRow("Cache", cacheSummary));
+    detailLines.push(buildStatusRow("Cache", cacheSummary));
   }
   if (costSummary) {
-    lines.push(buildStatusRow("Cost", costSummary));
+    detailLines.push(buildStatusRow("Cost", costSummary));
   }
   lines.push(buildStatusRow("Context", buildContextSummary(ctx, activeModel)));
   for (const row of getTelegramStatusLineProviderResults({ activeModel })) {
     lines.push(buildStatusRow(row.label, row.value));
+  }
+  if (detailLines.length > 0) {
+    lines.push(`<blockquote expandable>${detailLines.join("\n")}</blockquote>`);
   }
   return lines.join("\n");
 }
