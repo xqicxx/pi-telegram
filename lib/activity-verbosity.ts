@@ -23,7 +23,13 @@ export const TELEGRAM_ACTIVITY_DETAIL_MAX_CHARS = 1_200;
 export const TELEGRAM_ACTIVITY_MESSAGE_MAX_CHARS = 3_900;
 export const TELEGRAM_ACTIVITY_MESSAGE_MAX_TOOLS = 6;
 export const TELEGRAM_REASONING_MESSAGE_MAX_FRAMES = 24;
-export const TELEGRAM_REASONING_BUFFER_MAX_CHARS = 3_600;
+export const TELEGRAM_REASONING_BUFFER_MAX_CHARS = 16_000;
+
+/**
+ * Rich messages carry 32768 chars, so the thinking card can ship the whole
+ * reasoning instead of a 3900 char tail.
+ */
+const TELEGRAM_REASONING_MESSAGE_MAX_CHARS = 16_000;
 export const TELEGRAM_REASONING_MIN_INTERVAL_MS = 1_200;
 export const TELEGRAM_TOOL_UPDATE_MAX_ENTRIES = 4;
 
@@ -474,7 +480,7 @@ export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
         omitted > 0 ? `…\n${retained}` : retained,
       );
       message = buildTelegramThinkingRichMessage(text, reasoningOpen);
-      if (text.length <= TELEGRAM_ACTIVITY_MESSAGE_MAX_CHARS) break;
+      if (text.length <= TELEGRAM_REASONING_MESSAGE_MAX_CHARS) break;
       retained = retained.slice(
         -Math.max(1, Math.floor(retained.length * 0.75)),
       );

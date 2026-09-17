@@ -587,7 +587,10 @@ test("reasoning uses a persistent collapsed disclosure message", async () => {
     JSON.stringify(harness.richSends[0]?.rich_message),
     /🧠 Thinking/,
   );
-  assert.match(JSON.stringify(harness.richSends[0]?.rich_message), /"is_open":true/);
+  assert.match(
+    JSON.stringify(harness.richSends[0]?.rich_message),
+    /"is_open":true/,
+  );
   assert.equal(harness.edits.length, 1);
   assert.equal(harness.edits[0]?.text, undefined);
   assert.deepEqual(harness.edits[0]?.rich_message?.blocks, [

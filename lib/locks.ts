@@ -21,6 +21,13 @@ import { randomUUID } from "node:crypto";
 import { basename, dirname, join } from "node:path";
 import { resolveTelegramOwnersPath } from "./paths.ts";
 
+/**
+ * Build identity logged on every bridge auto-start, so "did the new code load?"
+ * is answerable from logs.jsonl instead of guessed at from Telegram output.
+ * Bump it whenever a change must be visible in the live bridge.
+ */
+export const TELEGRAM_BUILD_STAMP = "0.49.0+thinking-rich-2";
+
 export const TELEGRAM_LOCK_KEY = "default";
 export const TELEGRAM_BUS_LEADER_STALE_HEARTBEAT_MS = 8_000;
 export const TELEGRAM_OWNERSHIP_CHECK_MS = 1_000;
@@ -160,6 +167,8 @@ function readLocksForTransaction(path: string): Record<string, unknown> {
     if ((error as { code?: unknown })?.code === "ENOENT") return {};
     throw error;
   }
+  // pi-lens-ignore: unchecked-throwing-call — the transaction path must surface a
+  // corrupt owner store, not silently treat it as empty.
   const value: unknown = JSON.parse(source);
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`Invalid Telegram owner store: ${path}`);
@@ -1522,6 +1531,7 @@ export function createTelegramLockedPollingRuntime<
         deps.updateStatus(ctx);
         deps.recordRuntimeEvent?.("lock", "Telegram auto-start completed", {
           phase: "auto-start-complete",
+          build: TELEGRAM_BUILD_STAMP,
           durationMs: Date.now() - startedAtMs,
         });
       })()
