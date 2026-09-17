@@ -489,8 +489,9 @@ test("reasoning uses a persistent target-bound expandable HTML message", async (
   });
   assert.match(
     harness.sends[0]?.text ?? "",
-    /^<blockquote expandable>/,
+    /^<b>🧠 Thinking<\/b>/,
   );
+  assert.match(harness.sends[0]?.text ?? "", /<blockquote expandable>/);
   assert.equal(harness.edits.length, 1);
   assert.match(harness.edits[0]?.text ?? "", /Checking <b>state<\/b>/);
   assert.equal(harness.edits[0]?.parse_mode, "HTML");
@@ -514,7 +515,8 @@ test("agent end leaves an already current thinking message unchanged", async () 
   await harness.runtime.waitForIdle();
   assert.equal(harness.sends.length, 1);
   assert.equal(harness.edits.length, 0);
-  assert.match(harness.sends[0]?.text ?? "", /^<blockquote expandable>/);
+  assert.match(harness.sends[0]?.text ?? "", /^<b>🧠 Thinking<\/b>/);
+  assert.match(harness.sends[0]?.text ?? "", /<blockquote expandable>/);
 });
 
 test("agent start refreshes file-backed mode before activity isolation", async () => {
@@ -596,7 +598,10 @@ test("reasoning evidence renders inline HTML inside an expandable quote", () => 
   const html = renderTelegramThinkingActivityHtml(
     "**Reviewing data models**\na < b\n<https://example.com>",
   );
-  assert.match(html, /^<blockquote expandable>/);
+  assert.match(
+    html,
+    /^<b>🧠 Thinking<\/b> <code>Reviewing data models<\/code>/,
+  );
   assert.match(
     html,
     /<blockquote expandable><b>Reviewing data models<\/b>\na &lt; b/,

@@ -307,8 +307,23 @@ function isKnownSafeRichActivityRejection(error: unknown): boolean {
   return error instanceof Error && /HTTP 400: Bad Request:/i.test(error.message);
 }
 
+/**
+ * Thinking message: one always-visible header line with a snippet, then the
+ * collapsible evidence quote. The header keeps a running turn scannable without
+ * expanding anything, and needs no extra API call per frame.
+ */
 export function renderTelegramThinkingActivityHtml(text: string): string {
-  return `<blockquote expandable>${renderThinkingActivityEvidenceHtml(text)}</blockquote>`;
+  const firstLine = text.split("\n").find((line) => line.trim() !== "") ?? "";
+  // Strip the light markdown the panel renders inside the code snippet.
+  const snippet = firstLine
+    .replace(/\s+/gu, " ")
+    .replace(/[*_`#]+/gu, "")
+    .trim()
+    .slice(0, 60);
+  const header = snippet
+    ? `<b>🧠 Thinking</b> <code>${escapeHtml(snippet)}</code>`
+    : "<b>🧠 Thinking</b>";
+  return `${header}\n<blockquote expandable>${renderThinkingActivityEvidenceHtml(text)}</blockquote>`;
 }
 
 export interface TelegramActivityVerbosityRuntime {
