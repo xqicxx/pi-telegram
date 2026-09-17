@@ -496,11 +496,11 @@ test("tool evidence renders as ordinary expandable HTML fallback", () => {
 
   assert.match(html, /^<b>Exec&lt;script&gt;:<\/b> <code>done<\/code>/);
   assert.match(html, /<blockquote expandable>/);
-  assert.match(html, /"arguments": \{\n  "command"/);
+  assert.match(html, /"arguments": \{\n {2}"command"/);
   assert.equal(html.includes("https://\u200bexample.com/result"), true);
   assert.equal(html.includes("https://example.com/result"), false);
-  assert.match(html, /"update 1": \{\n  "content": \[\]/);
-  assert.match(html, /"result": \{\n  "content": \[\]/);
+  assert.match(html, /"update 1": \{\n {2}"content": \[\]/);
+  assert.match(html, /"result": \{\n {2}"content": \[\]/);
   assert.doesNotMatch(html, /rich_message|<pre>/);
 
   const statuses = renderTelegramToolActivityHtml([
@@ -586,10 +586,6 @@ test("reasoning uses a persistent collapsed disclosure message", async () => {
   assert.match(
     JSON.stringify(harness.richSends[0]?.rich_message),
     /🧠 Thinking/,
-  );
-  assert.match(
-    JSON.stringify(harness.richSends[0]?.rich_message),
-    /"is_open":true/,
   );
   assert.equal(harness.edits.length, 1);
   assert.equal(harness.edits[0]?.text, undefined);
@@ -714,22 +710,6 @@ test("reasoning renders one collapsed details block with a snippet", () => {
           text: "**Reviewing data models**\na < b\n<https://example.com>",
         },
       ],
-    },
-  ]);
-
-  const open = renderTelegramThinkingRichBlocks("live reasoning", {
-    open: true,
-  });
-  assert.deepEqual(open, [
-    {
-      type: "details",
-      summary: [
-        { type: "bold", text: "🧠 Thinking" },
-        " ",
-        { type: "code", text: "live reasoning" },
-      ],
-      is_open: true,
-      blocks: [{ type: "paragraph", text: "live reasoning" }],
     },
   ]);
 

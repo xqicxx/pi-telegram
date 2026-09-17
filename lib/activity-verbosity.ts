@@ -305,37 +305,35 @@ function thinkingActivitySnippet(text: string): string | undefined {
 }
 
 /**
- * Thinking message: a native disclosure row — snippet in the summary, reasoning
- * inside — instead of a quoted HTML wall. While reasoning streams the row is
- * open so each frame reads like a live tail; the final frame collapses it to
- * one line. Bot API details blocks carry no tap callback, so a manual collapse
- * mid-stream lasts only until the next frame.
+ * Thinking message: a native collapsed disclosure row — snippet in the summary,
+ * reasoning inside. Keeping it closed is what separates the reasoning from the
+ * tool card: an open body streams into the tool rows and the two read as one
+ * wall of text.
  */
 export function renderTelegramThinkingRichBlocks(
   text: string,
-  options: { open?: boolean } = {},
 ): TelegramInputRichBlock[] {
   const snippet = thinkingActivitySnippet(text);
-  const details = {
-    type: "details" as const,
-    summary: [
-      { type: "bold" as const, text: "🧠 Thinking" },
-      ...(snippet
-        ? ([" ", { type: "code" as const, text: snippet }] as const)
-        : []),
-    ],
-    blocks: [{ type: "paragraph" as const, text }],
-  };
-  return [options.open ? { ...details, is_open: true as const } : details];
+  return [
+    {
+      type: "details",
+      summary: [
+        { type: "bold", text: "🧠 Thinking" },
+        ...(snippet
+          ? ([" ", { type: "code" as const, text: snippet }] as const)
+          : []),
+      ],
+      blocks: [{ type: "paragraph", text }],
+    },
+  ];
 }
 
 /** Reasoning body for one message: the whole buffer, or its bounded tail. */
 function buildTelegramThinkingRichMessage(
   text: string,
-  open: boolean,
 ): TelegramInputRichMessage {
   return {
-    blocks: renderTelegramThinkingRichBlocks(text, { open }),
+    blocks: renderTelegramThinkingRichBlocks(text),
     skip_entity_detection: true,
   };
 }
@@ -408,7 +406,6 @@ export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
   let target: TelegramTarget | undefined;
   let reasoningBuffer = "";
   let reasoningChars = 0;
-  let reasoningOpen = false;
   let reasoningMessageFrames = 0;
   let lastReasoningMessageChars = 0;
   let reasoningMessage: ReasoningMessage | undefined;
@@ -473,13 +470,13 @@ export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
       return;
     }
     let retained = reasoningBuffer;
-    let message = buildTelegramThinkingRichMessage(retained, reasoningOpen);
+    let message = buildTelegramThinkingRichMessage(retained);
     do {
       const omitted = reasoningChars - retained.length;
       const text = redactActivityText(
         omitted > 0 ? `…\n${retained}` : retained,
       );
-      message = buildTelegramThinkingRichMessage(text, reasoningOpen);
+      message = buildTelegramThinkingRichMessage(text);
       if (text.length <= TELEGRAM_REASONING_MESSAGE_MAX_CHARS) break;
       retained = retained.slice(
         -Math.max(1, Math.floor(retained.length * 0.75)),
@@ -655,7 +652,6 @@ export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
     }
     if (event.type === "reasoning-delta") {
       if (!showThinking) return;
-      reasoningOpen = true;
       reasoningChars += event.delta.length;
       reasoningBuffer = `${reasoningBuffer}${event.delta}`.slice(
         -TELEGRAM_REASONING_BUFFER_MAX_CHARS,
@@ -673,9 +669,6 @@ export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
     }
     if (event.type === "reasoning-end") {
       if (!showThinking) return;
-      // The closing frame collapses the row: the operator sees one summary line
-      // and can tap to read the whole reasoning.
-      reasoningOpen = false;
       if (reasoningChars === 0 && event.text) {
         reasoningChars = event.text.length;
         reasoningBuffer = event.text.slice(

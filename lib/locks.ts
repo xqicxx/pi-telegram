@@ -26,7 +26,7 @@ import { resolveTelegramOwnersPath } from "./paths.ts";
  * is answerable from logs.jsonl instead of guessed at from Telegram output.
  * Bump it whenever a change must be visible in the live bridge.
  */
-export const TELEGRAM_BUILD_STAMP = "0.49.0+thinking-rich-2";
+export const TELEGRAM_BUILD_STAMP = "0.49.0+thinking-rich-3";
 
 export const TELEGRAM_LOCK_KEY = "default";
 export const TELEGRAM_BUS_LEADER_STALE_HEARTBEAT_MS = 8_000;
@@ -167,9 +167,14 @@ function readLocksForTransaction(path: string): Record<string, unknown> {
     if ((error as { code?: unknown })?.code === "ENOENT") return {};
     throw error;
   }
-  // pi-lens-ignore: unchecked-throwing-call — the transaction path must surface a
-  // corrupt owner store, not silently treat it as empty.
-  const value: unknown = JSON.parse(source);
+  let value: unknown;
+  try {
+    value = JSON.parse(source);
+  } catch {
+    // Fail closed as SyntaxError: callers treat a malformed owner store as a
+    // hard error, never a silent empty result.
+    throw new SyntaxError(`Invalid Telegram owner store: ${path}`);
+  }
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`Invalid Telegram owner store: ${path}`);
   }
@@ -1045,7 +1050,8 @@ export function createTelegramLockRuntime<TContext extends TelegramLockContext>(
       );
     },
     commitIfOwned: (commit) =>
-      !deliveryRevoked && withLockTransaction(locksPath, (locks) => {
+      !deliveryRevoked &&
+      withLockTransaction(locksPath, (locks) => {
         const effectiveKey = resolveEffectiveKey();
         const lock = parseTelegramLockEntry(locks[effectiveKey]);
         const exactOwner =
@@ -1061,7 +1067,8 @@ export function createTelegramLockRuntime<TContext extends TelegramLockContext>(
         return { result: true, changed: false };
       }),
     refresh: (ctx) =>
-      !deliveryRevoked && withLockTransaction(locksPath, (locks) => {
+      !deliveryRevoked &&
+      withLockTransaction(locksPath, (locks) => {
         const effectiveKey = resolveEffectiveKey();
         const lock = parseTelegramLockEntry(locks[effectiveKey]);
         const expectedOwner = adoptCompatibleOwnedLock(effectiveKey, lock, ctx);
@@ -1199,8 +1206,7 @@ export function createTelegramLockedPollingRuntime<
   let takeoverCandidate: TelegramLockEntry | undefined;
   let sessionAutoStartRun: Promise<void> | undefined;
   let pollingGeneration = 0;
-  const ownershipCheckMs =
-    deps.ownershipCheckMs ?? TELEGRAM_OWNERSHIP_CHECK_MS;
+  const ownershipCheckMs = deps.ownershipCheckMs ?? TELEGRAM_OWNERSHIP_CHECK_MS;
   const ownershipRefreshMs =
     deps.ownershipRefreshMs ?? TELEGRAM_OWNERSHIP_REFRESH_MS;
   const stopOwnershipWatcher = () => {
@@ -1331,7 +1337,8 @@ export function createTelegramLockedPollingRuntime<
       };
       if (deps.isContextCurrent?.(ctx) === false) return cancelled;
       const generation = ++pollingGeneration;
-      const isCurrent = () => generation === pollingGeneration &&
+      const isCurrent = () =>
+        generation === pollingGeneration &&
         (deps.isContextCurrent?.(ctx) ?? true);
       if (ownershipStop) await ownershipStop;
       if (!isCurrent()) return cancelled;
@@ -1452,15 +1459,23 @@ export function createTelegramLockedPollingRuntime<
       }
       ownershipStop = Promise.resolve()
         .then(() => deps.stopPolling())
-        .catch((error) => { cleanupErrors.push(String(error)); })
+        .catch((error) => {
+          cleanupErrors.push(String(error));
+        })
         .finally(() => {
           ownershipStop = undefined;
-          deps.recordRuntimeEvent?.("polling", ownership === "lost"
-            ? "Telegram transport stopped: local ownership lost; check for another Pi instance."
-            : "Telegram transport stopped: competing getUpdates client or ownership mismatch.", {
-            phase: "persistent-conflict", count, ownership,
-            ...(cleanupErrors.length ? { cleanupErrors } : {}),
-          });
+          deps.recordRuntimeEvent?.(
+            "polling",
+            ownership === "lost"
+              ? "Telegram transport stopped: local ownership lost; check for another Pi instance."
+              : "Telegram transport stopped: competing getUpdates client or ownership mismatch.",
+            {
+              phase: "persistent-conflict",
+              count,
+              ownership,
+              ...(cleanupErrors.length ? { cleanupErrors } : {}),
+            },
+          );
           deps.updateStatus(ctx);
         });
       deps.onTransportAvailabilityChanged?.();
@@ -1489,7 +1504,8 @@ export function createTelegramLockedPollingRuntime<
       }
       if (deps.isContextCurrent?.(ctx) === false) return;
       const generation = ++pollingGeneration;
-      const isCurrent = () => generation === pollingGeneration &&
+      const isCurrent = () =>
+        generation === pollingGeneration &&
         (deps.isContextCurrent?.(ctx) ?? true);
       const startedAtMs = Date.now();
       deps.recordRuntimeEvent?.("lock", "Telegram auto-start scheduled", {
@@ -1500,7 +1516,10 @@ export function createTelegramLockedPollingRuntime<
         await new Promise((resolve) => setTimeout(resolve, 0));
         if (ownershipStop) await ownershipStop;
         if (!isCurrent()) return;
-        if (canRestoreRememberedFollower && state?.kind === "active-elsewhere") {
+        if (
+          canRestoreRememberedFollower &&
+          state?.kind === "active-elsewhere"
+        ) {
           const restored = await deps.restoreFollowerWithOwner?.(
             ctx,
             state.lock,
