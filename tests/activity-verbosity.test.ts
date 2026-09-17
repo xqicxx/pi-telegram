@@ -696,7 +696,10 @@ test("reasoning keeps its label on its own line above a collapsed body", () => {
   const text = "**Reviewing data models**\na < b\n<https://example.com>";
   assert.deepEqual(renderTelegramThinkingRichBlocks(text), [
     { type: "paragraph", text: [{ type: "bold", text: "🧠 Thinking" }] },
-    { type: "paragraph", text },
+    {
+      type: "paragraph",
+      text: "**Reviewing data models** a < b <https://example.com>",
+    },
     {
       type: "details",
       summary: "展开全文",
@@ -705,17 +708,20 @@ test("reasoning keeps its label on its own line above a collapsed body", () => {
   ]);
 });
 
-test("preview keeps the newest reasoning lines and drops blank padding", () => {
-  const short = "line one\nline two";
-  assert.equal(thinkingActivityPreview(short), short);
+test("preview is one line of the newest reasoning", () => {
+  assert.equal(
+    thinkingActivityPreview("line one\nline two"),
+    "line one line two",
+  );
   assert.equal(thinkingActivityPreview("  \n\n  "), undefined);
 
   const long = `${"old ".repeat(80)}\n${"new tail sentence. ".repeat(4)}`;
   const preview = thinkingActivityPreview(long);
   assert.ok(preview);
   assert.ok(preview.length <= TELEGRAM_THINKING_PREVIEW_MAX_CHARS + 1);
+  assert.doesNotMatch(preview, /\n/);
   assert.match(preview, /^…/);
-  assert.match(preview, /new tail sentence\./);
+  assert.match(preview, /new tail sentence\.$/);
   assert.doesNotMatch(preview, /old old old old old/);
 });
 

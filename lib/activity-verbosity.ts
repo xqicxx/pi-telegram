@@ -293,24 +293,24 @@ function isKnownSafeRichActivityRejection(error: unknown): boolean {
   );
 }
 
-/** Chars of reasoning shown under the label before the collapsed full body. */
-export const TELEGRAM_THINKING_PREVIEW_MAX_CHARS = 160;
+/** Chars of reasoning shown as one line under the label. */
+export const TELEGRAM_THINKING_PREVIEW_MAX_CHARS = 90;
 
 /**
- * Opening lines of the reasoning, so the card says something without a tap.
- * The tail is always kept: the reasoning that matters is the newest text.
+ * One line of the newest reasoning, so the collapsed card stays three rows tall
+ * however long the model thinks. Newlines collapse: a preview that grows into a
+ * wall of text defeats the point of folding the card.
  */
 export function thinkingActivityPreview(text: string): string | undefined {
-  const flat = text.replace(/\n{3,}/gu, "\n\n").trim();
+  const flat = text.replace(/\s+/gu, " ").trim();
   if (!flat) return undefined;
-  if (flat.length <= TELEGRAM_THINKING_PREVIEW_MAX_CHARS) return flat;
-  const tail = flat.slice(-TELEGRAM_THINKING_PREVIEW_MAX_CHARS);
-  const firstBreak = tail.indexOf("\n");
-  return `…${firstBreak >= 0 ? tail.slice(firstBreak + 1) : tail}`;
+  return flat.length <= TELEGRAM_THINKING_PREVIEW_MAX_CHARS
+    ? flat
+    : `…${flat.slice(-TELEGRAM_THINKING_PREVIEW_MAX_CHARS)}`;
 }
 
 /**
- * Thinking message: a label line, a few lines of live preview, then a collapsed
+ * Thinking message: a label line, one line of live preview, then a collapsed
  * body. The label on its own line is what separates reasoning from the tool
  * card — tool rows are collapsed disclosures led by the tool name, so a
  * thinking row shaped the same way reads as one more tool call.
@@ -321,7 +321,7 @@ export function renderTelegramThinkingRichBlocks(
   const preview = thinkingActivityPreview(text);
   return [
     { type: "paragraph", text: [{ type: "bold", text: "🧠 Thinking" }] },
-    ...(preview ? ([{ type: "paragraph" as const, text: preview }]) : []),
+    ...(preview ? [{ type: "paragraph" as const, text: preview }] : []),
     {
       type: "details",
       summary: "展开全文",
