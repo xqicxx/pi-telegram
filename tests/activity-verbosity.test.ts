@@ -613,12 +613,14 @@ test("reasoning uses a persistent collapsed disclosure message", async () => {
     {
       type: "details",
       summary: "展开全文",
-      blocks: [{ type: "paragraph", text: "Checking **state**" }],
-    },
-    {
-      type: "buttons",
-      align: "center",
-      buttons: [{ text: "收起", callback_data: "think:fold:101" }],
+      blocks: [
+        { type: "paragraph", text: "Checking **state**" },
+        {
+          type: "buttons",
+          align: "center",
+          buttons: [{ text: "收起", callback_data: "think:fold:101" }],
+        },
+      ],
     },
   ]);
 });
@@ -645,7 +647,11 @@ test("agent end folds the thinking card the reader may have opened", async () =>
   assert.equal(fold?.text, undefined);
   assert.match(JSON.stringify(fold?.rich_message), /still thinking/);
   assert.match(JSON.stringify(fold?.rich_message), /展开全文/);
-  assert.deepEqual(fold?.rich_message?.blocks?.at(-1), {
+  // The closer rides inside the body so it only shows while the card is open.
+  const foldBlocks = fold?.rich_message?.blocks ?? [];
+  const detail = foldBlocks.at(-1);
+  assert.equal(detail?.type, "details");
+  assert.deepEqual(detail && "blocks" in detail ? detail.blocks.at(-1) : undefined, {
     type: "buttons",
     align: "center",
     buttons: [{ text: "收起", callback_data: "think:fold:101" }],
@@ -784,11 +790,17 @@ test("a 收起 request folds the card through the live runtime", async () => {
   assert.equal(await requestTelegramThinkingFold(42, messageId), true);
   const fold = harness.edits.at(-1);
   assert.match(JSON.stringify(fold?.rich_message), /🧠 Thought for/);
-  assert.deepEqual(fold?.rich_message?.blocks?.at(-1), {
-    type: "buttons",
-    align: "center",
-    buttons: [{ text: "收起", callback_data: `think:fold:${messageId}` }],
-  });
+  const foldBlocks = fold?.rich_message?.blocks ?? [];
+  const detail = foldBlocks.at(-1);
+  assert.equal(detail?.type, "details");
+  assert.deepEqual(
+    detail && "blocks" in detail ? detail.blocks.at(-1) : undefined,
+    {
+      type: "buttons",
+      align: "center",
+      buttons: [{ text: "收起", callback_data: `think:fold:${messageId}` }],
+    },
+  );
 
   // A tap from another chat must not fold someone else's card.
   assert.equal(await requestTelegramThinkingFold(7, messageId), false);

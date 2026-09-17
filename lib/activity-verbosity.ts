@@ -356,15 +356,19 @@ export function renderTelegramThinkingRichBlocks(
   const blocks: TelegramInputRichBlock[] = [{ type: "paragraph", text: head }];
   const preview = state.finished ? undefined : thinkingActivityPreview(text);
   if (preview) blocks.push({ type: "paragraph", text: preview });
+  const body: TelegramInputRichBlock[] = [{ type: "paragraph", text }];
+  if (state.foldMessageId !== undefined) {
+    // The closer lives *inside* the body: Telegram reports no expand event, so
+    // nesting is what makes it appear only once the reader opens the card — and
+    // vanish again with the body when the card folds.
+    body.push(thinkingFoldButtonBlock(state.foldMessageId));
+  }
   blocks.push({
     type: "details",
     // Size lives on the headline only — repeating it here read as a duplicate.
     summary: "展开全文",
-    blocks: [{ type: "paragraph", text }],
+    blocks: body,
   });
-  if (state.foldMessageId !== undefined) {
-    blocks.push(thinkingFoldButtonBlock(state.foldMessageId));
-  }
   return blocks;
 }
 
