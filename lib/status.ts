@@ -408,7 +408,8 @@ export interface TelegramBridgeStatusRuntimeDeps<
     TelegramBridgeStatusSyncSlice | undefined
   >;
   getThreadReconciliationState?: () =>
-    TelegramBridgeThreadReconciliationState | undefined;
+    | TelegramBridgeThreadReconciliationState
+    | undefined;
   getInstanceSlot?: () => string | undefined;
   getInstanceThreadName?: () => string | undefined;
   getNowMs?: () => number;
@@ -560,8 +561,10 @@ export function getTelegramStatusLineProviderResults(
       const result = provider(ctx);
       if (!result?.label || !result.value) continue;
       results.push(result);
-    } catch {
-      continue;
+    } catch (error) {
+      // A broken provider must not break the card, but the failure is surfaced
+      // instead of being swallowed silently.
+      console.error("[pi-telegram] status line provider failed", error);
     }
   }
   return results;
@@ -706,7 +709,9 @@ export function createTelegramBridgeStatusRuntime<
       const config = deps.getConfig();
       const queuedItems = deps.getQueuedItems();
       const hasPendingDispatch = deps.hasDispatchPending();
-      const waitingItems = hasPendingDispatch ? queuedItems.slice(1) : queuedItems;
+      const waitingItems = hasPendingDispatch
+        ? queuedItems.slice(1)
+        : queuedItems;
       const queuedItemCount =
         deps.getQueuedItemCount?.(waitingItems) ?? waitingItems.length;
       const hasActiveTurn = deps.hasActiveTurn();
@@ -765,9 +770,7 @@ export function createTelegramBridgeStatusRuntime<
         instanceThreadName: deps.getInstanceThreadName?.(),
         lockState: deps.getRuntimeLockState?.(),
         pollingActive: deps.isPollingActive(),
-        ...(deps.getPollingState
-          ? { polling: deps.getPollingState() }
-          : {}),
+        ...(deps.getPollingState ? { polling: deps.getPollingState() } : {}),
         ...(deps.getInboundWorkerState
           ? { inboundWorker: deps.getInboundWorkerState() }
           : {}),
@@ -930,7 +933,10 @@ export function buildTelegramStatusBarText(
     : "";
   if (!state.hasBotToken)
     return `${label} ${theme.fg("muted", "not configured")}${queued}`;
-  if (state.pollingStopReason === "persistent-conflict" && state.busRole !== "follower")
+  if (
+    state.pollingStopReason === "persistent-conflict" &&
+    state.busRole !== "follower"
+  )
     return `${label} ${theme.fg("error", "error")}`;
   if (!state.paired)
     return `${label} ${theme.fg("warning", "awaiting pairing")}${queued}`;
@@ -1034,9 +1040,7 @@ function buildTelegramLocalBusLines(
     slot: localBus.followerSlot,
     threadName: localBus.followerThreadName,
   });
-  const protocol = formatTelegramBusProtocolIdentity(
-    localBus.leaderProtocol,
-  );
+  const protocol = formatTelegramBusProtocolIdentity(localBus.leaderProtocol);
   const followerLine = `- follower registered: ${localBus.followerRegistered ? "yes" : "no"}${label ? ` ${label}` : ""}${target}${protocol}`;
   const lines = ["", "local bus:", followerLine];
   if (options.verbose) {
@@ -1082,9 +1086,9 @@ function buildTelegramThreadReconciliationLines(
   const reconciliation = state.threadReconciliation;
   if (!reconciliation) return [];
   const epoch =
-    reconciliation.leaderEpoch !== undefined
-      ? ` epoch=${reconciliation.leaderEpoch}`
-      : "";
+    reconciliation.leaderEpoch === undefined
+      ? ""
+      : ` epoch=${reconciliation.leaderEpoch}`;
   return [
     "reconciliation:",
     `- phase: ${reconciliation.phase} event=${reconciliation.event}${epoch}`,
@@ -1242,25 +1246,25 @@ function buildTelegramPollingDiagnosticLines(
   if (!polling) return [];
   return [
     `- phase: ${polling.phase}`,
-    ...(polling.phaseStartedAtMs !== undefined
-      ? [
+    ...(polling.phaseStartedAtMs === undefined
+      ? []
+      : [
           `- phase started: ${new Date(polling.phaseStartedAtMs).toISOString()}`,
-        ]
-      : []),
-    ...(polling.currentUpdateId !== undefined
-      ? [`- current update id: ${polling.currentUpdateId}`]
-      : []),
-    ...(polling.lastSuccessfulResponseAtMs !== undefined
-      ? [
+        ]),
+    ...(polling.currentUpdateId === undefined
+      ? []
+      : [`- current update id: ${polling.currentUpdateId}`]),
+    ...(polling.lastSuccessfulResponseAtMs === undefined
+      ? []
+      : [
           `- last successful response: ${new Date(polling.lastSuccessfulResponseAtMs).toISOString()} (updates=${polling.lastSuccessfulResponseUpdateCount ?? "unknown"})`,
-        ]
-      : []),
-    ...(polling.startedAtMs !== undefined
-      ? [`- started: ${new Date(polling.startedAtMs).toISOString()}`]
-      : []),
-    ...(polling.stoppedAtMs !== undefined
-      ? [`- stopped: ${new Date(polling.stoppedAtMs).toISOString()}`]
-      : []),
+        ]),
+    ...(polling.startedAtMs === undefined
+      ? []
+      : [`- started: ${new Date(polling.startedAtMs).toISOString()}`]),
+    ...(polling.stoppedAtMs === undefined
+      ? []
+      : [`- stopped: ${new Date(polling.stoppedAtMs).toISOString()}`]),
     ...(polling.stopReason ? [`- stop reason: ${polling.stopReason}`] : []),
   ];
 }
@@ -1280,9 +1284,11 @@ function buildTelegramInboundWorkerDiagnosticLines(
   return [
     `- state: ${worker.phase}`,
     `- generation: ${worker.generation}`,
-    ...(worker.phaseStartedAtMs !== undefined
-      ? [`- phase started: ${new Date(worker.phaseStartedAtMs).toISOString()}`]
-      : []),
+    ...(worker.phaseStartedAtMs === undefined
+      ? []
+      : [
+          `- phase started: ${new Date(worker.phaseStartedAtMs).toISOString()}`,
+        ]),
     `- journal: entries=${worker.journalEntryCount}, bytes=${worker.journalSerializedBytes}`,
     `- claims: queued=${worker.queuedClaimCount}, foreign-queued=${worker.foreignQueuedCount}, deferred=${worker.deferredClaimCount}, unsettled=${worker.unsettledExecutionCount}`,
     ...(worker.foreignQueuedOwner
@@ -1291,41 +1297,43 @@ function buildTelegramInboundWorkerDiagnosticLines(
         ]
       : []),
     `- failures: retry-wait=${worker.retryWaitCount}, terminal=${worker.failedCount}`,
-    ...(worker.currentUpdateId !== undefined
-      ? [`- current update id: ${worker.currentUpdateId}`]
-      : []),
-    ...(worker.nextRetryUpdateId !== undefined
-      ? [
-          `- next retry: update=${worker.nextRetryUpdateId}, attempt=${worker.nextRetryAttemptCount ?? "unknown"}, class=${worker.nextRetryFailureClass ?? "unknown"}${worker.nextRetryAtMs !== undefined ? ` at ${new Date(worker.nextRetryAtMs).toISOString()}` : ""}`,
-        ]
-      : []),
-    ...(worker.failedUpdateId !== undefined
-      ? [
-          `- terminal update: id=${worker.failedUpdateId}, failure=${worker.failedFailureId ?? "unknown"}, attempts=${worker.failedAttemptCount ?? "unknown"}, class=${worker.failedClass ?? "unknown"}${worker.terminalFailureAtMs !== undefined ? ` at ${new Date(worker.terminalFailureAtMs).toISOString()}` : ""}`,
+    ...(worker.currentUpdateId === undefined
+      ? []
+      : [`- current update id: ${worker.currentUpdateId}`]),
+    ...(worker.nextRetryUpdateId === undefined
+      ? []
+      : [
+          `- next retry: update=${worker.nextRetryUpdateId}, attempt=${worker.nextRetryAttemptCount ?? "unknown"}, class=${worker.nextRetryFailureClass ?? "unknown"}${worker.nextRetryAtMs === undefined ? "" : ` at ${new Date(worker.nextRetryAtMs).toISOString()}`}`,
+        ]),
+    ...(worker.failedUpdateId === undefined
+      ? []
+      : [
+          `- terminal update: id=${worker.failedUpdateId}, failure=${worker.failedFailureId ?? "unknown"}, attempts=${worker.failedAttemptCount ?? "unknown"}, class=${worker.failedClass ?? "unknown"}${worker.terminalFailureAtMs === undefined ? "" : ` at ${new Date(worker.terminalFailureAtMs).toISOString()}`}`,
           ...(worker.failedSummary
             ? [`- terminal summary: ${worker.failedSummary}`]
             : []),
-        ]
-      : []),
-    ...(worker.oldestAdmittedAtMs !== undefined
-      ? [
+        ]),
+    ...(worker.oldestAdmittedAtMs === undefined
+      ? []
+      : [
           `- oldest admitted: ${new Date(worker.oldestAdmittedAtMs).toISOString()}`,
-        ]
-      : []),
+        ]),
     ...(worker.blockedReason
       ? [`- blocked reason: ${worker.blockedReason}`]
       : []),
     ...(worker.blockedInputCustody
-      ? [`- blocked input custody: update=${worker.blockedInputCustody.updateId}, kind=${worker.blockedInputCustody.kind}`]
-      : []),
-    ...(worker.lastCompletedUpdateId !== undefined
       ? [
-          `- last completed: ${worker.lastCompletedUpdateId}${worker.lastCompletedAtMs !== undefined ? ` at ${new Date(worker.lastCompletedAtMs).toISOString()}` : ""}`,
+          `- blocked input custody: update=${worker.blockedInputCustody.updateId}, kind=${worker.blockedInputCustody.kind}`,
         ]
       : []),
+    ...(worker.lastCompletedUpdateId === undefined
+      ? []
+      : [
+          `- last completed: ${worker.lastCompletedUpdateId}${worker.lastCompletedAtMs === undefined ? "" : ` at ${new Date(worker.lastCompletedAtMs).toISOString()}`}`,
+        ]),
     ...(worker.lastFailurePhase
       ? [
-          `- last failure: ${worker.lastFailurePhase}${worker.lastFailureAtMs !== undefined ? ` at ${new Date(worker.lastFailureAtMs).toISOString()}` : ""}`,
+          `- last failure: ${worker.lastFailurePhase}${worker.lastFailureAtMs === undefined ? "" : ` at ${new Date(worker.lastFailureAtMs).toISOString()}`}`,
         ]
       : []),
   ];
@@ -1572,7 +1580,7 @@ function buildContextSummary(
   const usage = ctx.getContextUsage();
   if (!usage) return "unknown";
   const contextWindow = usage.contextWindow ?? activeModel?.contextWindow ?? 0;
-  const percent = usage.percent !== null ? `${usage.percent.toFixed(1)}%` : "?";
+  const percent = usage.percent === null ? "?" : `${usage.percent.toFixed(1)}%`;
   return `${percent}/${formatTokens(contextWindow)}`;
 }
 
@@ -1630,3 +1638,23 @@ export function buildStatusHtml(
   }
   return lines.join("\n");
 }
+
+/**
+ * Parse the label/value rows back out of a status card. Returns undefined when a
+ * row has a different shape, so callers keep the HTML card instead of rendering
+ * a table the data does not support.
+ */
+export function parseTelegramStatusRows(
+  statusHtml: string,
+): Array<{ label: string; value: string }> | undefined {
+  const rows: Array<{ label: string; value: string }> = [];
+  const body = statusHtml.replace(/<\/?blockquote[^>]*>/gu, "");
+  for (const line of body.split("\n")) {
+    if (line.trim() === "") continue;
+    const match = line.match(/^<b>([^<]+):<\/b> <code>(.*)<\/code>$/u);
+    if (!match) return undefined;
+    rows.push({ label: match[1]!, value: match[2]! });
+  }
+  return rows.length > 0 ? rows : undefined;
+}
+

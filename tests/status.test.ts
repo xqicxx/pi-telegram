@@ -579,8 +579,11 @@ test("Status lines expose polling and inbound-worker progress separately", () =>
   );
   assert.equal(diagnostic.includes("- operator action:"), false);
   assert.ok(diagnostic.includes("- blocked reason: execution"));
-  assert.ok(diagnostic.includes(
-    "- blocked input custody: update=9, kind=running-outcome-unknown"));
+  assert.ok(
+    diagnostic.includes(
+      "- blocked input custody: update=9, kind=running-outcome-unknown",
+    ),
+  );
   assert.ok(
     diagnostic.includes(
       "- last successful response: 1970-01-01T00:00:01.500Z (updates=2)",
@@ -751,22 +754,38 @@ test("Persistent polling conflict remains visible across ordinary refreshes unti
   const runtime = createTelegramBridgeStatusRuntime({
     getConfig: () => ({ botToken: "token", allowedUserId: 7 }),
     isPollingActive: () => stopReason === undefined,
-    getPollingState: () => ({ phase: stopReason ? "stopped" : "starting", stopReason }),
+    getPollingState: () => ({
+      phase: stopReason ? "stopped" : "starting",
+      stopReason,
+    }),
     getBusRole: () => busRole,
     getLocalBus: () => (busRole ? { followerRegistered } : undefined),
-    getActiveSourceMessageIds: () => undefined, hasActiveTurn: () => false,
-    hasDispatchPending: () => false, isCompactionInProgress: () => false,
-    getActiveToolExecutions: () => 0, hasPendingModelSwitch: () => false,
-    getQueuedItems: () => [], formatQueuedStatus: () => "", getRecentRuntimeEvents: () => [],
+    getActiveSourceMessageIds: () => undefined,
+    hasActiveTurn: () => false,
+    hasDispatchPending: () => false,
+    isCompactionInProgress: () => false,
+    getActiveToolExecutions: () => 0,
+    hasPendingModelSwitch: () => false,
+    getQueuedItems: () => [],
+    formatQueuedStatus: () => "",
+    getRecentRuntimeEvents: () => [],
   });
-  const ctx = { ui: {
-    theme: { fg: (_token: string, text: string) => text },
-    setStatus: (_key: string, text: string) => { rendered.push(text); },
-  } };
+  const ctx = {
+    ui: {
+      theme: { fg: (_token: string, text: string) => text },
+      setStatus: (_key: string, text: string) => {
+        rendered.push(text);
+      },
+    },
+  };
   runtime.updateStatus(ctx);
   runtime.updateStatus(ctx);
   assert.deepEqual(rendered, ["telegram error", "telegram error"]);
-  assert.ok(runtime.getStatusLines().some((line) => line.includes("persistent-conflict")));
+  assert.ok(
+    runtime
+      .getStatusLines()
+      .some((line) => line.includes("persistent-conflict")),
+  );
   busRole = "follower";
   runtime.updateStatus(ctx);
   assert.equal(rendered.at(-1), "telegram reconnecting");
@@ -883,9 +902,7 @@ test("Bridge status lines render named-profile diagnostic paths", () => {
   assert.ok(
     lines.includes("- state: ~/.pi/agent/tmp/telegram/state.work.json"),
   );
-  assert.ok(
-    lines.includes("- logs: ~/.pi/agent/tmp/telegram/logs.work.jsonl"),
-  );
+  assert.ok(lines.includes("- logs: ~/.pi/agent/tmp/telegram/logs.work.jsonl"));
 });
 
 test("Bridge status lines distinguish unknown bot identity from missing config", () => {

@@ -4,6 +4,7 @@
  * Owns model-menu state, scoped model pages, model callback planning, and model-menu message rendering
  */
 
+import type { TelegramInputRichBlock } from "./telegram-api.ts";
 import type { TelegramInlineKeyboardMarkup } from "./keyboard.ts";
 import {
   getCanonicalModelId,
@@ -115,8 +116,8 @@ export type TelegramModelMenuStateBuilderContext<
 
 export interface TelegramModelMenuStateBuilderDeps<
   TModel extends MenuModel = MenuModel,
-  TContext extends TelegramModelMenuStateBuilderContext<TModel> =
-    TelegramModelMenuStateBuilderContext<TModel>,
+  TContext extends
+    TelegramModelMenuStateBuilderContext<TModel> = TelegramModelMenuStateBuilderContext<TModel>,
 > {
   runtime: TelegramModelMenuRuntime<TModel>;
   createSettingsManager: (
@@ -134,13 +135,16 @@ export interface TelegramMenuMessageRuntimeDeps {
     text: string,
     mode: "markdown" | "html" | "plain",
     replyMarkup: TelegramReplyMarkup,
+    options?: TelegramInteractiveMessageOptions,
   ) => Promise<void>;
   sendInteractiveMessage: (
     chatId: number,
     text: string,
     mode: "markdown" | "html" | "plain",
     replyMarkup: TelegramReplyMarkup,
-    options?: { target?: { chatId: number; threadId?: number } },
+    options?: TelegramInteractiveMessageOptions & {
+      target?: { chatId: number; threadId?: number };
+    },
   ) => Promise<number | undefined>;
 }
 
@@ -208,6 +212,16 @@ export interface TelegramMenuRenderPayload {
   text: string;
   mode: "markdown" | "html" | "plain";
   replyMarkup: TelegramReplyMarkup;
+  /**
+   * Optional rich blocks. When present the card is delivered as one rich message
+   * (currently the status table); `text` stays the plain fallback.
+   */
+  blocks?: readonly TelegramInputRichBlock[];
+}
+
+/** Optional rich-block payload for an interactive menu message. */
+export interface TelegramInteractiveMessageOptions {
+  blocks?: readonly TelegramInputRichBlock[];
 }
 
 export type TelegramModelCallbackPlan<TModel extends MenuModel = MenuModel> =
@@ -329,6 +343,7 @@ async function editTelegramMenuMessage(
     appliedPayload.text,
     appliedPayload.mode,
     appliedPayload.replyMarkup,
+    appliedPayload.blocks ? { blocks: appliedPayload.blocks } : undefined,
   );
 }
 
@@ -343,9 +358,12 @@ function sendTelegramMenuMessage(
     appliedPayload.text,
     appliedPayload.mode,
     appliedPayload.replyMarkup,
-    state.threadId !== undefined
-      ? { target: { chatId: state.chatId, threadId: state.threadId } }
-      : undefined,
+    {
+      ...(state.threadId !== undefined
+        ? { target: { chatId: state.chatId, threadId: state.threadId } }
+        : {}),
+      ...(appliedPayload.blocks ? { blocks: appliedPayload.blocks } : {}),
+    },
   );
 }
 
@@ -482,8 +500,8 @@ export function createTelegramModelMenuRuntime<
 
 export function createTelegramModelMenuStateBuilder<
   TModel extends MenuModel = MenuModel,
-  TContext extends TelegramModelMenuStateBuilderContext<TModel> =
-    TelegramModelMenuStateBuilderContext<TModel>,
+  TContext extends
+    TelegramModelMenuStateBuilderContext<TModel> = TelegramModelMenuStateBuilderContext<TModel>,
 >(
   deps: TelegramModelMenuStateBuilderDeps<TModel, TContext>,
 ): (

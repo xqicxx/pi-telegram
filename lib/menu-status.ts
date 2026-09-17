@@ -4,6 +4,8 @@
  * Owns status-menu payloads, status callback handling, and status-menu message rendering
  */
 
+import { buildTelegramTableBlock } from "./rich-blocks.ts";
+import { parseTelegramStatusRows } from "./status.ts";
 import { formatTelegramCommandEmojiPrefix } from "./commands.ts";
 import {
   getTelegramSectionMainMenuRows,
@@ -211,10 +213,24 @@ export function buildTelegramStatusMenuRenderPayload(
   sectionRegistry?: TelegramSectionRegistry,
   isVoiceReplyActive?: boolean,
 ): TelegramMenuRenderPayload {
+  // A card whose rows all match the row shape becomes a native table; anything
+  // else keeps the HTML card instead of a half-parsed table.
+  const rows = parseTelegramStatusRows(statusText);
+  const statusBlocks = rows
+    ? [
+        buildTelegramTableBlock({
+          rows: rows.map((row) => [row.label, row.value]),
+          bordered: true,
+          striped: true,
+          compact: true,
+        }),
+      ]
+    : undefined;
   return {
     nextMode: "status",
     text: statusText,
     mode: "html",
+    ...(statusBlocks ? { blocks: statusBlocks } : {}),
     replyMarkup: buildStatusReplyMarkup(
       activeModel,
       currentThinkingLevel,
