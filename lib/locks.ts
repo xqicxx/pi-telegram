@@ -26,7 +26,7 @@ import { resolveTelegramOwnersPath } from "./paths.ts";
  * is answerable from logs.jsonl instead of guessed at from Telegram output.
  * Bump it whenever a change must be visible in the live bridge.
  */
-export const TELEGRAM_BUILD_STAMP = "0.49.0+thinking-digest-8";
+export const TELEGRAM_BUILD_STAMP = "0.49.0+thinking-digest-9";
 
 export const TELEGRAM_LOCK_KEY = "default";
 export const TELEGRAM_BUS_LEADER_STALE_HEARTBEAT_MS = 8_000;

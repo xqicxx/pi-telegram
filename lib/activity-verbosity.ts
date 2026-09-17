@@ -333,7 +333,9 @@ export function renderTelegramThinkingRichBlocks(
   state: TelegramThinkingCardState = {},
 ): TelegramInputRichBlock[] {
   const chars =
-    state.chars && state.chars > 0 ? formatThinkingChars(state.chars) : undefined;
+    state.chars && state.chars > 0
+      ? formatThinkingChars(state.chars)
+      : undefined;
   const head: TelegramRichText[] = [
     state.finished
       ? {
@@ -440,17 +442,20 @@ export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
   let reasoningMessageFrames = 0;
   let lastReasoningMessageChars = 0;
   let reasoningMessage: ReasoningMessage | undefined;
-  /** Last published thinking card, re-written collapsed when the turn ends. */
-  let reasoningFold:
-    | {
-        messageId: number;
-        target: TelegramTarget;
-        text: string;
-        chars: number;
-        tools: number;
-        durationMs: number;
-      }
-    | undefined;
+  /**
+   * Thinking cards published this turn that still owe a fold. One entry per
+   * message: a turn can reason more than once, and every card has to fold, not
+   * just the newest one.
+   */
+  interface ReasoningFold {
+    messageId: number;
+    target: TelegramTarget;
+    text: string;
+    chars: number;
+    tools: number;
+    durationMs: number;
+  }
+  let reasoningFolds: ReasoningFold[] = [];
   /** Completed tool calls this turn, shown in the thinking digest. */
   let turnToolCount = 0;
   let reasoningStartedMs: number | undefined;
@@ -469,7 +474,7 @@ export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
     reasoningMessageFrames = 0;
     lastReasoningMessageChars = 0;
     reasoningMessage = undefined;
-    reasoningFold = undefined;
+    reasoningFolds = [];
     turnToolCount = 0;
     reasoningStartedMs = undefined;
     reasoningBlocked = false;
@@ -564,7 +569,7 @@ export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
       lastReasoningMessageChars = reasoningChars;
       lastReasoningPublishMs = getNowMs();
       if (reasoningMessage) {
-        reasoningFold = {
+        const entry: ReasoningFold = {
           messageId: reasoningMessage.messageId,
           target: { ...reasoningMessage.target },
           text: publishedText,
@@ -575,6 +580,11 @@ export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
               ? 0
               : getNowMs() - reasoningStartedMs,
         };
+        const index = reasoningFolds.findIndex(
+          (item) => item.messageId === entry.messageId,
+        );
+        if (index >= 0) reasoningFolds[index] = entry;
+        else reasoningFolds.push(entry);
       }
     } catch (error) {
       if (!isCurrent(acceptedGeneration, admittedAuthority)) return;
@@ -586,6 +596,42 @@ export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
       );
     }
   };
+  /** Rewrite a finished thinking card as its one-line digest. */
+  const foldReasoningCard = async (
+    entry: ReasoningFold,
+    event: TelegramActivityEvent,
+    acceptedGeneration: number,
+  ) => {
+    try {
+      await deps.editMessageText({
+        chat_id: entry.target.chatId,
+        message_id: entry.messageId,
+        rich_message: buildTelegramThinkingRichMessage(
+          entry.text,
+          renderTelegramThinkingRichBlocks(entry.text, {
+            chars: entry.chars,
+            tools: entry.tools,
+            durationMs: entry.durationMs,
+            finished: true,
+          }),
+        ),
+      });
+    } catch (error) {
+      if (!isCurrent(acceptedGeneration, authority)) return;
+      deps.recordFailure?.("reasoning-fold", event, error);
+    }
+  };
+
+  /** Take the newest card awaiting a fold, or one specific card by id. */
+  const takeReasoningFold = (messageId?: number): ReasoningFold | undefined => {
+    const index =
+      messageId === undefined
+        ? reasoningFolds.length - 1
+        : reasoningFolds.findIndex((item) => item.messageId === messageId);
+    if (index < 0) return undefined;
+    return reasoningFolds.splice(index, 1)[0];
+  };
+
   const publishTool = async (
     event: TelegramActivityEvent,
     tool: ToolActivity,
@@ -750,6 +796,13 @@ export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
         await publishReasoning(event, acceptedGeneration);
       }
       if (!isCurrent(acceptedGeneration, admittedAuthority)) return;
+      // This reasoning segment is over: fold its card now, so the reader never
+      // has to scroll back to the summary row to close a long wall of text.
+      const finished = takeReasoningFold();
+      if (finished) {
+        await foldReasoningCard(finished, event, acceptedGeneration);
+        if (!isCurrent(acceptedGeneration, admittedAuthority)) return;
+      }
       reasoningBuffer = "";
       reasoningChars = 0;
       reasoningMessageFrames = 0;
@@ -818,31 +871,12 @@ export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
         await publishReasoning(event, acceptedGeneration);
       }
       if (!isCurrent(acceptedGeneration, admittedAuthority)) return;
-      const fold = reasoningFold;
-      reasoningFold = undefined;
-      if (fold) {
-        // The reader scrolled to the end of an open card; rewriting it here is
-        // what folds it without them scrolling back to the summary row.
-        try {
-          await deps.editMessageText({
-            chat_id: fold.target.chatId,
-            message_id: fold.messageId,
-            rich_message: buildTelegramThinkingRichMessage(
-              fold.text,
-              renderTelegramThinkingRichBlocks(fold.text, {
-                chars: fold.chars,
-                tools: fold.tools,
-                durationMs: fold.durationMs,
-                finished: true,
-              }),
-            ),
-          });
-        } catch (error) {
-          if (!isCurrent(acceptedGeneration, admittedAuthority)) return;
-          deps.recordFailure?.("reasoning-fold", event, error);
-        }
+      const pendingFolds = reasoningFolds;
+      reasoningFolds = [];
+      for (const entry of pendingFolds) {
+        await foldReasoningCard(entry, event, acceptedGeneration);
+        if (!isCurrent(acceptedGeneration, admittedAuthority)) return;
       }
-      if (!isCurrent(acceptedGeneration, admittedAuthority)) return;
       clearActivity();
     }
   };

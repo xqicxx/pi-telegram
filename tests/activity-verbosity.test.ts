@@ -285,7 +285,8 @@ for (const stage of [
         }
         await runtime.waitForIdle();
         const later = effects.slice(beforeRelease);
-        assert.equal(later.length, 1);
+        // Thinking turns also fold their card once reasoning ends.
+        assert.equal(later.length, thinking ? 2 : 1);
         assert.equal(later[0]?.chat_id, 8);
         assert.doesNotMatch(JSON.stringify(later), /old (?:result|reasoning)/);
         assert.equal(nextId, stage === "refresh" ? 1 : 2);
@@ -295,6 +296,9 @@ for (const stage of [
             thinking ? "new reasoning extra" : "must-survive.txt",
           ),
         );
+        if (thinking) {
+          assert.match(JSON.stringify(later.at(-1)), /Thought for/);
+        }
       } finally {
         release();
         await oldIdle;
@@ -589,8 +593,12 @@ test("reasoning uses a persistent collapsed disclosure message", async () => {
     JSON.stringify(harness.richSends[0]?.rich_message),
     /🧠 Thinking/,
   );
-  assert.equal(harness.edits.length, 1);
+  assert.equal(harness.edits.length, 2);
   assert.equal(harness.edits[0]?.text, undefined);
+  const digest = JSON.stringify(harness.edits[1]?.rich_message);
+  assert.match(digest, /🧠 Thought for/);
+  assert.match(digest, /展开全文 · 18 字/);
+  assert.doesNotMatch(digest, /🧠 Thinking…/);
   assert.deepEqual(harness.edits[0]?.rich_message?.blocks, [
     {
       type: "paragraph",
@@ -1059,7 +1067,11 @@ test("reasoning edits are throttled to a minimum interval between frames", async
     }),
   );
   await harness.runtime.waitForIdle();
-  assert.equal(harness.edits.length, 2, "final flush covers throttled chars");
+  assert.equal(
+    harness.edits.length,
+    3,
+    "final flush plus the fold cover throttled chars",
+  );
 });
 
 test("reset drops accepted events that have not started processing", async () => {
