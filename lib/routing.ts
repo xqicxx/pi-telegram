@@ -2178,13 +2178,15 @@ export function createTelegramInboundRouteRuntime<
           Activity.TELEGRAM_THINKING_FOLD_CALLBACK_PREFIX.length,
         ),
       );
-      const folded =
-        typeof chatId === "number" && Number.isInteger(messageId)
-          ? await Activity.requestTelegramThinkingFold(chatId, messageId)
-          : false;
-      await deps.answerCallbackQuery(
-        query.id,
-        folded ? "✅ 已收起" : "卡片已收起或已过期",
+      if (typeof chatId !== "number" || !Number.isInteger(messageId)) {
+        await deps.answerCallbackQuery(query.id, "卡片已过期");
+        return;
+      }
+      // Acknowledge before folding: the fold edit queues behind whatever else
+      // this chat is receiving, and the tap should feel answered at once.
+      await deps.answerCallbackQuery(query.id, "收起中…");
+      void Activity.requestTelegramThinkingFold(chatId, messageId).catch(
+        () => {},
       );
       return;
     }

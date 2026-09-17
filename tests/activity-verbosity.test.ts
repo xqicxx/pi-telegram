@@ -651,11 +651,14 @@ test("agent end folds the thinking card the reader may have opened", async () =>
   const foldBlocks = fold?.rich_message?.blocks ?? [];
   const detail = foldBlocks.at(-1);
   assert.equal(detail?.type, "details");
-  assert.deepEqual(detail && "blocks" in detail ? detail.blocks.at(-1) : undefined, {
-    type: "buttons",
-    align: "center",
-    buttons: [{ text: "收起", callback_data: "think:fold:101" }],
-  });
+  assert.deepEqual(
+    detail && "blocks" in detail ? detail.blocks.at(-1) : undefined,
+    {
+      type: "buttons",
+      align: "center",
+      buttons: [{ text: "收起", callback_data: "think:fold:101" }],
+    },
+  );
 });
 
 test("agent start refreshes file-backed mode before activity isolation", async () => {
@@ -1073,7 +1076,7 @@ test("reasoning edits are throttled to a minimum interval between frames", async
     event(2, {
       type: "reasoning-delta",
       contentIndex: 0,
-      delta: "a".repeat(200),
+      delta: "a".repeat(600),
     }),
   );
   await harness.runtime.waitForIdle();
@@ -1082,17 +1085,17 @@ test("reasoning edits are throttled to a minimum interval between frames", async
     event(3, {
       type: "reasoning-delta",
       contentIndex: 0,
-      delta: "b".repeat(200),
+      delta: "b".repeat(600),
     }),
   );
   await harness.runtime.waitForIdle();
   assert.equal(harness.edits.length, 0, "within interval no edit");
-  harness.advanceNow(2_000);
+  harness.advanceNow(4_000);
   harness.runtime.accept(
     event(4, {
       type: "reasoning-delta",
       contentIndex: 0,
-      delta: "c".repeat(200),
+      delta: "c".repeat(600),
     }),
   );
   await harness.runtime.waitForIdle();
@@ -1101,7 +1104,7 @@ test("reasoning edits are throttled to a minimum interval between frames", async
     event(5, {
       type: "reasoning-delta",
       contentIndex: 0,
-      delta: "d".repeat(200),
+      delta: "d".repeat(600),
     }),
   );
   await harness.runtime.waitForIdle();

@@ -31,7 +31,9 @@ export const TELEGRAM_REASONING_BUFFER_MAX_CHARS = 16_000;
  * reasoning instead of a 3900 char tail.
  */
 const TELEGRAM_REASONING_MESSAGE_MAX_CHARS = 16_000;
-export const TELEGRAM_REASONING_MIN_INTERVAL_MS = 1_200;
+// Telegram throttles edits per chat, so a user tap queues behind these frames.
+// Refreshing a one-line preview less often keeps that queue short.
+export const TELEGRAM_REASONING_MIN_INTERVAL_MS = 3_000;
 export const TELEGRAM_TOOL_UPDATE_MAX_ENTRIES = 4;
 
 interface ToolActivity {
@@ -895,7 +897,7 @@ export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
         (reasoningMessageFrames === 0 ||
           (getNowMs() - lastReasoningPublishMs >=
             TELEGRAM_REASONING_MIN_INTERVAL_MS &&
-            reasoningChars - lastReasoningMessageChars >= 160))
+            reasoningChars - lastReasoningMessageChars >= 400))
       ) {
         await publishReasoning(event, acceptedGeneration);
       }
