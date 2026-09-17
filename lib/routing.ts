@@ -6,6 +6,7 @@
 
 import { readFile } from "node:fs/promises";
 import { basename, dirname } from "node:path";
+import * as Activity from "./activity-verbosity.ts";
 import * as Bus from "./bus.ts";
 import * as Commands from "./commands.ts";
 import type { TelegramConfigStore } from "./config.ts";
@@ -2007,6 +2008,26 @@ export function createTelegramInboundRouteRuntime<
       }
       return;
     }
+    if (
+      typeof query.data === "string" &&
+      query.data.startsWith(Activity.TELEGRAM_THINKING_FOLD_CALLBACK_PREFIX)
+    ) {
+      const chatId = query.message?.chat?.id;
+      const messageId = Number(
+        query.data.slice(
+          Activity.TELEGRAM_THINKING_FOLD_CALLBACK_PREFIX.length,
+        ),
+      );
+      const folded =
+        typeof chatId === "number" && Number.isInteger(messageId)
+          ? await Activity.requestTelegramThinkingFold(chatId, messageId)
+          : false;
+      await deps.answerCallbackQuery(
+        query.id,
+        folded ? "✅ 已收起" : "卡片已收起或已过期",
+      );
+      return;
+    }
     const handledByNew =
       await Commands.handleTelegramNewConfirmationCallback(query, {
         ctx,
@@ -2790,6 +2811,8 @@ export function createTelegramInboundRouteRuntime<
       assertExecutionCurrent();
     }
     const text = guestMessage.text ?? "";
+    // SAFETY: guest updates arrive as untyped Telegram payloads; every field
+    // read off this view is re-checked defensively below.
     const gm = guestMessage as unknown as Record<string, unknown>;
     // Build telegram prefix with guest context
     const chatRaw = gm.chat as Record<string, unknown>;
@@ -2835,6 +2858,9 @@ export function createTelegramInboundRouteRuntime<
       ? ((replyMsg.text as string) || (replyMsg.caption as string) || "").trim()
       : "";
     // Download files, run inbound handlers
+    // SAFETY: a guest message carries the same media fields the downloader
+    // reads (chat/message ids and attachments); the parser above already
+    // validated the shape it needs.
     const guestMsg = guestMessage as unknown as Media.TelegramMediaMessage;
     const replyFiles = guestMsg.reply_to_message
       ? await Media.downloadTelegramMessageFiles(

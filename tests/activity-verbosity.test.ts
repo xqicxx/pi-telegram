@@ -10,6 +10,7 @@ import {
   createTelegramActivityVerbosityRuntime,
   renderTelegramThinkingRichBlocks,
   renderTelegramToolActivityHtml,
+  requestTelegramThinkingFold,
   renderTelegramToolActivityRichMessage,
   TELEGRAM_ACTIVITY_MESSAGE_MAX_TOOLS,
   TELEGRAM_REASONING_BUFFER_MAX_CHARS,
@@ -754,6 +755,34 @@ test("turn-end digest folds the card and reports size, duration, and tools", () 
       },
     ],
   );
+});
+
+test("a 收起 request folds the card through the live runtime", async () => {
+  const harness = createHarness({ mode: "thinking" });
+  harness.runtime.accept(event(1, { type: "agent-start" }));
+  harness.runtime.accept(
+    event(2, {
+      type: "reasoning-delta",
+      contentIndex: 0,
+      delta: "long enough reasoning to publish a card",
+    }),
+  );
+  await harness.runtime.waitForIdle();
+  assert.equal(harness.richSends.length, 1);
+  const messageId = harness.richSends[0] ? 101 : 0;
+
+  assert.equal(await requestTelegramThinkingFold(42, messageId), true);
+  const fold = harness.edits.at(-1);
+  assert.match(JSON.stringify(fold?.rich_message), /🧠 Thought for/);
+  assert.equal(
+    (fold?.reply_markup as { inline_keyboard: Array<Array<{ text: string }>> })
+      .inline_keyboard[0]?.[0]?.text,
+    "收起",
+  );
+
+  // A tap from another chat must not fold someone else's card.
+  assert.equal(await requestTelegramThinkingFold(7, messageId), false);
+  harness.runtime.stop();
 });
 
 test("preview is one line of the newest reasoning", () => {

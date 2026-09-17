@@ -363,6 +363,85 @@ export function renderTelegramThinkingRichBlocks(
   return blocks;
 }
 
+export const TELEGRAM_THINKING_FOLD_CALLBACK_PREFIX = "think:fold:";
+
+/**
+ * Inline "收起" row for a thinking card. The disclosure summary sits at the top
+ * of a long body, so the reader who scrolled to the end has no closer within
+ * reach; this button rides at the bottom of the message.
+ */
+export function thinkingFoldKeyboard(messageId: number): {
+  inline_keyboard: Array<Array<{ text: string; callback_data: string }>>;
+} {
+  return {
+    inline_keyboard: [
+      [
+        {
+          text: "收起",
+          callback_data: `${TELEGRAM_THINKING_FOLD_CALLBACK_PREFIX}${messageId}`,
+        },
+      ],
+    ],
+  };
+}
+
+export interface TelegramThinkingCardFold {
+  messageId: number;
+  target: TelegramTarget;
+  text: string;
+  chars: number;
+  tools: number;
+  durationMs: number;
+}
+
+const TELEGRAM_THINKING_CARD_CACHE_LIMIT = 20;
+const thinkingCards = new Map<number, TelegramThinkingCardFold>();
+type ThinkingFoldRequest = (
+  chatId: number,
+  messageId: number,
+) => Promise<boolean>;
+const thinkingFoldRequests: ThinkingFoldRequest[] = [];
+
+/** Keep the newest card text so a tap can still fold it after the turn ended. */
+function rememberThinkingCard(fold: TelegramThinkingCardFold): void {
+  thinkingCards.delete(fold.messageId);
+  thinkingCards.set(fold.messageId, fold);
+  while (thinkingCards.size > TELEGRAM_THINKING_CARD_CACHE_LIMIT) {
+    const oldest = thinkingCards.keys().next();
+    if (oldest.done) break;
+    thinkingCards.delete(oldest.value);
+  }
+}
+
+export function registerTelegramThinkingFoldRequest(
+  handler: ThinkingFoldRequest,
+): () => void {
+  thinkingFoldRequests.push(handler);
+  return () => {
+    const index = thinkingFoldRequests.indexOf(handler);
+    if (index >= 0) thinkingFoldRequests.splice(index, 1);
+  };
+}
+
+/** Fold the card behind a tap; false when no live runtime owns that message. */
+export async function requestTelegramThinkingFold(
+  chatId: number,
+  messageId: number,
+): Promise<boolean> {
+  // Newest runtime first: the card belongs to whichever runtime cached it last,
+  // so walk the registrations backwards instead of reversing a copy.
+  for (let index = thinkingFoldRequests.length - 1; index >= 0; index -= 1) {
+    const handler = thinkingFoldRequests[index];
+    if (!handler) continue;
+    try {
+      if (await handler(chatId, messageId)) return true;
+    } catch {
+      // Another runtime may own the card; keep offering the request down the chain.
+    }
+  }
+  return false;
+}
+
 /** Reasoning body for one message: the whole buffer, or its bounded tail. */
 function buildTelegramThinkingRichMessage(
   text: string,
@@ -448,15 +527,7 @@ export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
    * message: a turn can reason more than once, and every card has to fold, not
    * just the newest one.
    */
-  interface ReasoningFold {
-    messageId: number;
-    target: TelegramTarget;
-    text: string;
-    chars: number;
-    tools: number;
-    durationMs: number;
-  }
-  let reasoningFolds: ReasoningFold[] = [];
+  let reasoningFolds: TelegramThinkingCardFold[] = [];
   /** Completed tool calls this turn, shown in the thinking digest. */
   let turnToolCount = 0;
   let reasoningStartedMs: number | undefined;
@@ -570,7 +641,7 @@ export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
       lastReasoningMessageChars = reasoningChars;
       lastReasoningPublishMs = getNowMs();
       if (reasoningMessage) {
-        const entry: ReasoningFold = {
+        const entry: TelegramThinkingCardFold = {
           messageId: reasoningMessage.messageId,
           target: { ...reasoningMessage.target },
           text: publishedText,
@@ -581,6 +652,7 @@ export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
               ? 0
               : getNowMs() - reasoningStartedMs,
         };
+        rememberThinkingCard(entry);
         const index = reasoningFolds.findIndex(
           (item) => item.messageId === entry.messageId,
         );
@@ -597,34 +669,52 @@ export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
       );
     }
   };
-  /** Rewrite a finished thinking card as its one-line digest. */
+  /** Rewrite a thinking card as its one-line digest, with the closer button. */
+  const applyThinkingFold = async (entry: TelegramThinkingCardFold) => {
+    await deps.editMessageText({
+      chat_id: entry.target.chatId,
+      message_id: entry.messageId,
+      rich_message: buildTelegramThinkingRichMessage(
+        entry.text,
+        renderTelegramThinkingRichBlocks(entry.text, {
+          chars: entry.chars,
+          tools: entry.tools,
+          durationMs: entry.durationMs,
+          finished: true,
+        }),
+      ),
+      reply_markup: thinkingFoldKeyboard(entry.messageId),
+    });
+  };
+
   const foldReasoningCard = async (
-    entry: ReasoningFold,
+    entry: TelegramThinkingCardFold,
     event: TelegramActivityEvent,
     acceptedGeneration: number,
   ) => {
     try {
-      await deps.editMessageText({
-        chat_id: entry.target.chatId,
-        message_id: entry.messageId,
-        rich_message: buildTelegramThinkingRichMessage(
-          entry.text,
-          renderTelegramThinkingRichBlocks(entry.text, {
-            chars: entry.chars,
-            tools: entry.tools,
-            durationMs: entry.durationMs,
-            finished: true,
-          }),
-        ),
-      });
+      await applyThinkingFold(entry);
     } catch (error) {
       if (!isCurrent(acceptedGeneration, authority)) return;
       deps.recordFailure?.("reasoning-fold", event, error);
     }
   };
 
+  // The "收起" button under a card asks the owning runtime to fold it; the card
+  // text is cached above because the tap can arrive long after the turn ended.
+  const unregisterThinkingFoldRequest = registerTelegramThinkingFoldRequest(
+    async (chatId, messageId) => {
+      const entry = thinkingCards.get(messageId);
+      if (!entry || entry.target.chatId !== chatId) return false;
+      await applyThinkingFold(entry);
+      return true;
+    },
+  );
+
   /** Take the newest card awaiting a fold, or one specific card by id. */
-  const takeReasoningFold = (messageId?: number): ReasoningFold | undefined => {
+  const takeReasoningFold = (
+    messageId?: number,
+  ): TelegramThinkingCardFold | undefined => {
     const index =
       messageId === undefined
         ? reasoningFolds.length - 1
@@ -915,6 +1005,7 @@ export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
     stop() {
       active = false;
       generation += 1;
+      unregisterThinkingFoldRequest();
       clearActivity();
       tail = Promise.resolve();
     },
