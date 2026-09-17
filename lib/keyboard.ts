@@ -19,7 +19,20 @@ export type TelegramInlineKeyboardButton = {
 
 export interface TelegramInlineKeyboardMarkup {
   inline_keyboard: TelegramInlineKeyboardButton[][];
+  /** Bot API 10.3: also open the client reply box aimed at this message. */
+  force_reply?: boolean;
 }
+
+/** Reply markup that opens the client reply box without showing buttons. */
+export interface TelegramForceReplyMarkup {
+  force_reply: true;
+  input_field_placeholder?: string;
+}
+
+/** Any reply markup the bridge may attach to an outbound message. */
+export type TelegramReplyMarkup =
+  | TelegramInlineKeyboardMarkup
+  | TelegramForceReplyMarkup;
 
 export const TELEGRAM_CALLBACK_DATA_MAX_BYTES = 64;
 

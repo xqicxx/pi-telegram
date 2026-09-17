@@ -421,6 +421,10 @@ test("Bridge delivery runtime owns rendering and bus-aware transport adaptation"
         sentBodies.push(body);
         return { message_id: 101 };
       },
+      async sendRichMessage(body) {
+        sentBodies.push(body);
+        return { message_id: 102 };
+      },
       async editMessageText() {
         return "edited";
       },
@@ -474,6 +478,10 @@ test("Bridge delivery runtime rejects work after transport generation replacemen
       async sendMessage() {
         apiCalls += 1;
         return { message_id: 101 };
+      },
+      async sendRichMessage() {
+        apiCalls += 1;
+        return { message_id: 102 };
       },
       async editMessageText() {
         apiCalls += 1;

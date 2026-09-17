@@ -291,9 +291,29 @@ export type TelegramRichText =
   | TelegramRichText[]
   | { type: "bold" | "code"; text: TelegramRichText };
 
+export type TelegramInputRichTableCell = {
+  text?: TelegramRichText;
+  is_header?: true;
+  colspan?: number;
+  rowspan?: number;
+  align?: "left" | "center" | "right";
+  valign?: "top" | "middle" | "bottom";
+};
+
 export type TelegramInputRichBlock =
   | { type: "heading"; text: TelegramRichText; size?: 1 | 2 | 3 }
   | { type: "pre"; text: TelegramRichText; language?: string }
+  | { type: "paragraph"; text: TelegramRichText }
+  | { type: "divider" }
+  | { type: "footer"; text: TelegramRichText }
+  | {
+      type: "table";
+      cells: TelegramInputRichTableCell[][];
+      is_bordered?: true;
+      is_striped?: true;
+      is_compact?: true;
+      caption?: TelegramRichText;
+    }
   | {
       type: "details";
       summary: TelegramRichText;
@@ -879,6 +899,14 @@ export function isTelegramApiCommitUnknownError(
   return error instanceof TelegramApiCommitUnknownError;
 }
 
+/** Raised when a request target is not a URL the bridge may call. */
+export class TelegramApiRequestUrlError extends Error {
+  constructor(target: unknown, cause?: unknown) {
+    super(`Invalid Telegram API request URL: ${String(target)}`, { cause });
+    this.name = "TelegramApiRequestUrlError";
+  }
+}
+
 class TelegramApiHttpError extends Error {
   readonly status: number | undefined;
   readonly retryAfterSeconds: number | undefined;
@@ -997,8 +1025,26 @@ function getTelegramRetryDelayMs(
   return Math.max(0, baseDelayMs * 2 ** attempt);
 }
 
-function getTelegramApiAbortReason(signal: AbortSignal): unknown {
-  return signal.reason ?? new DOMException("Aborted", "AbortError");
+/**
+ * The value an aborted Telegram API call is rejected with. A signal that carries
+ * a reason (the polling layer aborts with a structured marker object) is
+ * rethrown unchanged so its owner keeps its control-flow contract; a bare abort
+ * becomes an Error so the failure is never silent.
+ */
+export type TelegramApiAbortReason =
+  | Error
+  | DOMException
+  | object
+  | string
+  | number
+  | boolean;
+
+function getTelegramApiAbortReason(signal: AbortSignal): TelegramApiAbortReason {
+  const reason: unknown = signal.reason;
+  if (reason === undefined || reason === null) {
+    return new DOMException("Aborted", "AbortError");
+  }
+  return reason as TelegramApiAbortReason;
 }
 
 function throwIfTelegramApiCallAborted(signal: AbortSignal | undefined): void {
@@ -1210,9 +1256,13 @@ async function telegramHttpsFetch(
   init: RequestInit,
   family: TelegramNetworkFamily,
 ): Promise<Response> {
-  const url = new URL(
-    typeof input === "string" || input instanceof URL ? input : input.url,
-  );
+  const target = typeof input === "string" || input instanceof URL ? input : input.url;
+  let url: URL;
+  try {
+    url = new URL(target);
+  } catch (error) {
+    throw new TelegramApiRequestUrlError(target, error);
+  }
   const body = getTelegramRequestBodyBuffer(init.body);
   const headers = new Headers(init.headers);
   if (body && !headers.has("content-length")) {
@@ -1269,12 +1319,58 @@ export function setTelegramApiHttpsFetchForTesting(
   };
 }
 
+const TELEGRAM_API_FETCH_HOSTS = new Set(["api.telegram.org"]);
+
+/**
+ * Only Telegram API and file hosts may be fetched while a bot token is in
+ * scope; anything else is refused instead of following the caller input.
+ */
+function resolveTelegramApiFetchTarget(
+  input: string | URL | Request,
+): URL {
+  const target =
+    typeof input === "string" || input instanceof URL ? String(input) : input.url;
+  let url: URL;
+  try {
+    url = new URL(target);
+  } catch (error) {
+    throw new TelegramApiRequestUrlError(target, error);
+  }
+  if (url.protocol !== "https:") {
+    throw new TelegramApiRequestUrlError(
+      target,
+      new Error("Telegram API requests must use https."),
+    );
+  }
+  return url;
+}
+
+/** Refuse any fetch whose host is not an allowlisted Telegram host. */
+function assertTelegramApiFetchHost(
+  input: string | URL | Request,
+  url: URL,
+): void {
+  if (!TELEGRAM_API_FETCH_HOSTS.has(url.hostname)) {
+    throw new TelegramApiRequestUrlError(
+      input,
+      new Error(`Host ${url.hostname} is not an allowlisted Telegram host.`),
+    );
+  }
+}
+
 async function telegramFetch(
   input: string | URL | Request,
   init: RequestInit = {},
   family?: TelegramNetworkFamily,
 ): Promise<Response> {
-  if (!family) return fetch(input, init);
+  if (!family) {
+    const url = resolveTelegramApiFetchTarget(input);
+    assertTelegramApiFetchHost(input, url);
+    if (!TELEGRAM_API_FETCH_HOSTS.has(url.hostname)) {
+      throw new TelegramApiRequestUrlError(input);
+    }
+    return fetch(url, init);
+  }
   return (telegramHttpsFetchForTesting ?? telegramHttpsFetch)(
     input,
     init,
@@ -1416,9 +1512,9 @@ async function callTelegramWithRetry<TResponse>(
         method,
         delayMs: ms,
         attempt,
-        ...(error.retryAfterSeconds !== undefined
-          ? { retryAfterSeconds: error.retryAfterSeconds }
-          : {}),
+        ...(error.retryAfterSeconds === undefined
+          ? {}
+          : { retryAfterSeconds: error.retryAfterSeconds }),
       });
     }
     if (options?.sleep) await options.sleep(ms);
@@ -1588,6 +1684,8 @@ export async function callTelegramMultipart<TResponse>(
             {
               method: "POST",
               headers: { "content-type": multipart.contentType },
+              // SAFETY: Node fetch accepts a Buffer body; the DOM lib types only
+              // model ArrayBuffer-backed BodyInit, so the buffer is cast here.
               body: multipart.body as unknown as BodyInit,
               signal: options?.signal,
             },
@@ -1730,9 +1828,9 @@ export function createTelegramNativeMarkdownDraftSender(deps: {
       chat_id: chatId,
       draft_id: draftId,
       rich_message: { markdown: text },
-      ...(options?.message_thread_id !== undefined
-        ? { message_thread_id: options.message_thread_id }
-        : {}),
+      ...(options?.message_thread_id === undefined
+        ? {}
+        : { message_thread_id: options.message_thread_id }),
     });
   };
 }
@@ -2019,18 +2117,18 @@ export function createTelegramBridgeApiRuntime(
       callRecorded<boolean>("sendChatAction", {
         chat_id: chatId,
         action,
-        ...(options?.message_thread_id !== undefined
-          ? { message_thread_id: options.message_thread_id }
-          : {}),
+        ...(options?.message_thread_id === undefined
+          ? {}
+          : { message_thread_id: options.message_thread_id }),
       }),
     sendTypingAction: createTelegramChatActionSender(
       (chatId, action, options) =>
         callRecorded<boolean>("sendChatAction", {
           chat_id: chatId,
           action,
-          ...(options?.message_thread_id !== undefined
-            ? { message_thread_id: options.message_thread_id }
-            : {}),
+          ...(options?.message_thread_id === undefined
+            ? {}
+            : { message_thread_id: options.message_thread_id }),
         }),
       "typing",
     ),
@@ -2039,9 +2137,9 @@ export function createTelegramBridgeApiRuntime(
         callRecorded<boolean>("sendChatAction", {
           chat_id: chatId,
           action,
-          ...(options?.message_thread_id !== undefined
-            ? { message_thread_id: options.message_thread_id }
-            : {}),
+          ...(options?.message_thread_id === undefined
+            ? {}
+            : { message_thread_id: options.message_thread_id }),
         }),
       "record_voice",
     ),
@@ -2191,9 +2289,9 @@ export function createTelegramApiClient(
                     method: wait.method,
                     waitMs: wait.delayMs,
                     attempt: wait.attempt,
-                    ...(wait.retryAfterSeconds !== undefined
-                      ? { retryAfterSeconds: wait.retryAfterSeconds }
-                      : {}),
+                    ...(wait.retryAfterSeconds === undefined
+                      ? {}
+                      : { retryAfterSeconds: wait.retryAfterSeconds }),
                   },
                 );
               },

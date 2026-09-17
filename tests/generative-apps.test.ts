@@ -1174,6 +1174,7 @@ test("telegram_bind live surfaces retain classic, leader, and follower delivery 
       getActiveTurnTarget: policy.getActiveTurnTarget,
       api: {
         async sendMessage(body) { sends.push(body); return { message_id: 654 }; },
+        async sendRichMessage(body) { sends.push(body); return { message_id: 655 }; },
         async editMessageText(body) { edits.push(body); return "edited"; },
         async deleteMessage() {},
         async sendChatAction() { return true; },

@@ -7,8 +7,9 @@
 import { markTelegramBusAggregateDelivery } from "./bus.ts";
 import {
   assertTelegramInlineKeyboardCallbackData,
-  type TelegramInlineKeyboardMarkup,
+  type TelegramReplyMarkup,
 } from "./keyboard.ts";
+import type { TelegramInputRichBlock } from "./rich-blocks.ts";
 import {
   withTelegramReplyParameters,
   renderTelegramMessage,
@@ -39,7 +40,13 @@ export type TelegramDeliveryParseMode = "plain" | "html" | "markdown";
 export interface TelegramDeliveryView {
   text: string;
   parseMode?: TelegramDeliveryParseMode;
-  replyMarkup?: TelegramInlineKeyboardMarkup;
+  replyMarkup?: TelegramReplyMarkup;
+  /**
+   * Optional Bot API rich blocks. When present the view is delivered as a single
+   * rich message instead of being re-flowed from `text`; `text` stays the plain
+   * fallback used by clients and logs that cannot render blocks.
+   */
+  blocks?: readonly TelegramInputRichBlock[];
 }
 
 export type TelegramDeliveryTarget = TelegramTarget;
@@ -86,7 +93,10 @@ export interface SendTelegramViewOptions {
 }
 
 export type TelegramDeliveryChatAction =
-  "typing" | "upload_document" | "upload_photo" | "record_voice";
+  | "typing"
+  | "upload_document"
+  | "upload_photo"
+  | "record_voice";
 
 /** @internal */
 export interface TelegramDeliveryRuntime {
@@ -121,16 +131,19 @@ export interface TelegramDeliveryTargetResolverDeps {
 export interface TelegramDeliveryRenderedChunk {
   text: string;
   parseMode: TelegramDeliveryParseMode;
+  /** Bot API rich blocks; when present the chunk is delivered as one rich message. */
+  blocks?: readonly TelegramInputRichBlock[];
 }
 
 /** @internal */
 export interface TelegramDeliveryTransportOptions {
   replyToMessageId?: number;
-  replyMarkup?: TelegramInlineKeyboardMarkup | null;
+  replyMarkup?: TelegramReplyMarkup | null;
 }
 
 /** @internal */
-export interface TelegramDeliveryRuntimeDeps extends TelegramDeliveryTargetResolverDeps {
+export interface TelegramDeliveryRuntimeDeps
+  extends TelegramDeliveryTargetResolverDeps {
   generation: string;
   renderView: (
     view: TelegramDeliveryView,
@@ -169,7 +182,11 @@ export interface TelegramBridgeDeliveryRuntimeDeps {
   isTransportActive?: () => boolean;
   api: Pick<
     TelegramBridgeApiRuntime,
-    "sendMessage" | "editMessageText" | "deleteMessage" | "sendChatAction"
+    | "sendMessage"
+    | "sendRichMessage"
+    | "editMessageText"
+    | "deleteMessage"
+    | "sendChatAction"
   >;
   recordOwnership: (input: {
     chatId: number;
@@ -206,7 +223,9 @@ export function createTelegramDeliveryLifecycleHooks(
   };
 }
 
-export function createTelegramDeliveryGenerationSeed(instanceId: string): string {
+export function createTelegramDeliveryGenerationSeed(
+  instanceId: string,
+): string {
   return `${instanceId}:${Date.now()}`;
 }
 
@@ -263,16 +282,25 @@ function failure<T>(
 }
 
 export function classifyTelegramDeliveryTransportError(error: unknown): {
-  reason: Extract<TelegramDeliveryFailureReason,
-    "commit-unknown" | "message-unavailable" | "rate-limited" |
-    "transport-retryable" | "transport-failed">;
+  reason: Extract<
+    TelegramDeliveryFailureReason,
+    | "commit-unknown"
+    | "message-unavailable"
+    | "rate-limited"
+    | "transport-retryable"
+    | "transport-failed"
+  >;
   retryAfterMs?: number;
 } {
-  if (isTelegramApiCommitUnknownError(error)) return { reason: "commit-unknown" };
-  if (isTelegramMessageUnavailableError(error)) return { reason: "message-unavailable" };
+  if (isTelegramApiCommitUnknownError(error))
+    return { reason: "commit-unknown" };
+  if (isTelegramMessageUnavailableError(error))
+    return { reason: "message-unavailable" };
   const retryAfterMs = getTelegramApiRetryAfterMs(error);
-  if (retryAfterMs !== undefined) return { reason: "rate-limited", retryAfterMs };
-  if (isRetryableTelegramApiError(error)) return { reason: "transport-retryable" };
+  if (retryAfterMs !== undefined)
+    return { reason: "rate-limited", retryAfterMs };
+  if (isRetryableTelegramApiError(error))
+    return { reason: "transport-retryable" };
   return { reason: "transport-failed" };
 }
 
@@ -737,6 +765,15 @@ export function createTelegramBridgeDeliveryRuntime(
     },
     renderView(view) {
       assertTelegramInlineKeyboardCallbackData(view.replyMarkup);
+      if (view.blocks?.length) {
+        return [
+          {
+            text: view.text,
+            parseMode: view.parseMode ?? "plain",
+            blocks: view.blocks,
+          },
+        ];
+      }
       return renderTelegramMessage(view.text, {
         mode: view.parseMode ?? "plain",
       }).map(function (chunk) {
@@ -749,15 +786,33 @@ export function createTelegramBridgeDeliveryRuntime(
     async sendChunk(target, chunk, options) {
       assertTransportActive();
       const sent = await withTelegramReplyParameters(
-        target.chatId, options.replyToMessageId, target,
+        target.chatId,
+        options.replyToMessageId,
+        target,
         (replyParameters) => {
+          const markup = options.replyMarkup
+            ? { reply_markup: options.replyMarkup }
+            : {};
+          if (chunk.blocks?.length) {
+            return deps.api.sendRichMessage({
+              chat_id: target.chatId,
+              rich_message: { blocks: [...chunk.blocks] },
+              ...getTelegramTargetThreadParams(target),
+              ...(replyParameters ? { reply_parameters: replyParameters } : {}),
+              ...markup,
+            });
+          }
           const body = {
             chat_id: target.chatId,
             text: chunk.text,
-            ...(chunk.parseMode === "html" ? { parse_mode: "HTML" as const } : {}),
+            ...(chunk.parseMode === "html"
+              ? { parse_mode: "HTML" as const }
+              : {}),
             ...getTelegramTargetThreadParams(target),
             ...(replyParameters ? { reply_parameters: replyParameters } : {}),
-            ...(options.replyMarkup ? { reply_markup: options.replyMarkup } : {}),
+            ...(options.replyMarkup
+              ? { reply_markup: options.replyMarkup }
+              : {}),
           };
           return deps.api.sendMessage(
             target.threadId === undefined
@@ -776,6 +831,18 @@ export function createTelegramBridgeDeliveryRuntime(
     },
     async editChunk(target, messageId, chunk, options) {
       assertTransportActive();
+      if (chunk.blocks?.length) {
+        await deps.api.editMessageText({
+          chat_id: target.chatId,
+          message_id: messageId,
+          rich_message: { blocks: [...chunk.blocks] },
+          reply_markup:
+            options.replyMarkup === null
+              ? { inline_keyboard: [] }
+              : options.replyMarkup,
+        });
+        return;
+      }
       await deps.api.editMessageText({
         chat_id: target.chatId,
         message_id: messageId,
@@ -802,7 +869,8 @@ export function createTelegramBridgeDeliveryRuntime(
 }
 
 function getBoundTelegramDeliveryRuntime():
-  TelegramDeliveryRuntime | TelegramDeliveryResult<never> {
+  | TelegramDeliveryRuntime
+  | TelegramDeliveryResult<never> {
   const runtime = getTelegramDeliveryRuntimeRegistry().runtime;
   return (
     runtime ??
@@ -886,11 +954,16 @@ export async function editTelegramTargetView(
 ): Promise<TelegramDeliveryResult<TelegramDeliveryHandle>> {
   const invalid = validateView<TelegramDeliveryHandle>(view);
   if (invalid) return invalid;
-  return runDeliveryOperation((runtime) => runtime.editView({
-    target: { ...target },
-    messageIds: [messageId],
-    generation: runtime.generation,
-  }, view));
+  return runDeliveryOperation((runtime) =>
+    runtime.editView(
+      {
+        target: { ...target },
+        messageIds: [messageId],
+        generation: runtime.generation,
+      },
+      view,
+    ),
+  );
 }
 
 export async function editTelegramView(
