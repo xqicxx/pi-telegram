@@ -4,6 +4,7 @@
  */
 
 import { splitTelegramStatusCard } from "../lib/status.ts";
+import { buildTelegramStatusMenuRenderPayload } from "../lib/menu-status.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -1620,4 +1621,18 @@ test("status card splits into a preface and real table rows", () => {
   assert.match(split.prelude, /Pi 控制台/);
   assert.doesNotMatch(split.prelude, /<b>|<code>/);
   assert.equal(splitTelegramStatusCard("<b>no rows here</b>"), undefined);
+
+  const payload = buildTelegramStatusMenuRenderPayload(card, undefined, "high");
+  const table = payload.blocks?.find((block) => block.type === "table") as
+    | { type: "table"; cells: Array<Array<{ text: string; is_header?: true }>> }
+    | undefined;
+  assert.ok(table, "card with rows must carry a table block");
+  assert.equal(table.cells.length, 4);
+  assert.deepEqual(table.cells[0], [{ text: "Status" }, { text: "idle" }]);
+  assert.ok(
+    table.cells.every((row) =>
+      row.every((cell) => cell.is_header === undefined),
+    ),
+    "a key/value card must not style its first row as a header",
+  );
 });

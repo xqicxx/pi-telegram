@@ -96,9 +96,9 @@ function sendTelegramMenuMessage(
     appliedPayload.text,
     appliedPayload.mode,
     appliedPayload.replyMarkup,
-    state.threadId !== undefined
-      ? { target: { chatId: state.chatId, threadId: state.threadId } }
-      : undefined,
+    state.threadId === undefined
+      ? undefined
+      : { target: { chatId: state.chatId, threadId: state.threadId } },
   );
 }
 
@@ -223,6 +223,7 @@ export function buildTelegramStatusMenuRenderPayload(
           : []),
         buildTelegramTableBlock({
           rows: card.rows.map((row) => [row.label, row.value]),
+          header: false,
           bordered: true,
           striped: true,
           compact: true,

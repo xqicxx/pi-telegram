@@ -5,10 +5,7 @@
  */
 
 import type { TelegramActivityEvent, TelegramActivityPublicationRuntime } from "./activity.ts";
-import {
-  escapeHtml,
-  renderTelegramInlineMarkdownHtml,
-} from "./rendering.ts";
+import { escapeHtml } from "./rendering.ts";
 import type {
   TelegramEditMessageTextBody,
   TelegramInputRichBlock,
@@ -161,12 +158,6 @@ function escapeActivityEvidenceHtml(text: string): string {
   return escapeHtml(neutralizeActivityAutoLinks(text));
 }
 
-function renderThinkingActivityEvidenceHtml(text: string): string {
-  return renderTelegramInlineMarkdownHtml(neutralizeActivityAutoLinks(text), {
-    allowLinks: false,
-  });
-}
-
 function formatToolActivityLabel(label: string): string {
   return label
     .split("_")
@@ -307,23 +298,45 @@ function isKnownSafeRichActivityRejection(error: unknown): boolean {
   return error instanceof Error && /HTTP 400: Bad Request:/i.test(error.message);
 }
 
-/**
- * Thinking message: one always-visible header line with a snippet, then the
- * collapsible evidence quote. The header keeps a running turn scannable without
- * expanding anything, and needs no extra API call per frame.
- */
-export function renderTelegramThinkingActivityHtml(text: string): string {
+/** One-line hint so a collapsed thinking card still says where it started. */
+function thinkingActivitySnippet(text: string): string | undefined {
   const firstLine = text.split("\n").find((line) => line.trim() !== "") ?? "";
-  // Strip the light markdown the panel renders inside the code snippet.
-  const snippet = firstLine
-    .replace(/\s+/gu, " ")
-    .replace(/[*_`#]+/gu, "")
-    .trim()
-    .slice(0, 60);
-  const header = snippet
-    ? `<b>🧠 Thinking</b> <code>${escapeHtml(snippet)}</code>`
-    : "<b>🧠 Thinking</b>";
-  return `${header}\n<blockquote expandable>${renderThinkingActivityEvidenceHtml(text)}</blockquote>`;
+  const flat = firstLine.replace(/\s+/gu, " ").replace(/[*_`#]+/gu, "").trim();
+  if (!flat) return undefined;
+  return flat.length > 60 ? `${flat.slice(0, 59)}…` : flat;
+}
+
+/**
+ * Thinking message: a native collapsed disclosure row — snippet in the summary,
+ * reasoning inside — instead of a quoted HTML wall. The client owns the toggle,
+ * so the transcript stays scannable without an extra API call per frame.
+ */
+export function renderTelegramThinkingRichBlocks(
+  text: string,
+): TelegramInputRichBlock[] {
+  const snippet = thinkingActivitySnippet(text);
+  return [
+    {
+      type: "details",
+      summary: [
+        { type: "bold", text: "🧠 Thinking" },
+        ...(snippet
+          ? ([" ", { type: "code" as const, text: snippet }] as const)
+          : []),
+      ],
+      blocks: [{ type: "paragraph", text }],
+    },
+  ];
+}
+
+/** Reasoning body for one message: the whole buffer, or its bounded tail. */
+function buildTelegramThinkingRichMessage(
+  text: string,
+): TelegramInputRichMessage {
+  return {
+    blocks: renderTelegramThinkingRichBlocks(text),
+    skip_entity_detection: true,
+  };
 }
 
 export interface TelegramActivityVerbosityRuntime {
@@ -452,16 +465,14 @@ export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
       return;
     }
     let retained = reasoningBuffer;
-    let body = "";
+    let message = buildTelegramThinkingRichMessage(retained);
     do {
       const omitted = reasoningChars - retained.length;
       const text = redactActivityText(
-        omitted > 0
-          ? `… [${omitted} earlier chars omitted]\n${retained}`
-          : retained,
+        omitted > 0 ? `…\n${retained}` : retained,
       );
-      body = renderTelegramThinkingActivityHtml(text);
-      if (body.length <= TELEGRAM_ACTIVITY_MESSAGE_MAX_CHARS) break;
+      message = buildTelegramThinkingRichMessage(text);
+      if (text.length <= TELEGRAM_ACTIVITY_MESSAGE_MAX_CHARS) break;
       retained = retained.slice(-Math.max(1, Math.floor(retained.length * 0.75)));
     } while (retained.length > 1);
     const canEdit =
@@ -471,18 +482,15 @@ export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
         await deps.editMessageText({
           chat_id: target.chatId,
           message_id: reasoningMessage.messageId,
-          text: body,
-          parse_mode: "HTML",
-          link_preview_options: { is_disabled: true },
+          rich_message: message,
         });
       } else {
-        const sent = await deps.sendMessage({
+        const sent = await deps.sendRichMessage({
           chat_id: target.chatId,
           ...(target.threadId === undefined
             ? {}
             : { message_thread_id: target.threadId }),
-          text: body,
-          parse_mode: "HTML",
+          rich_message: message,
           link_preview_options: { is_disabled: true },
         });
         if (!isCurrent(acceptedGeneration, admittedAuthority)) return;

@@ -1463,10 +1463,8 @@ test("Verbose activity reaches classic transport before the final assistant answ
 
     const thinkingIndex = calls.findIndex(
       (call) =>
-        call.method === "sendMessage" &&
-        typeof call.body.text === "string" &&
-        call.body.text.includes("<blockquote expandable>") &&
-        !call.body.text.includes("Thinking:"),
+        call.method === "sendRichMessage" &&
+        JSON.stringify(call.body.rich_message).includes("🧠 Thinking"),
     );
     assert.equal(calls[thinkingIndex]?.body.chat_id, 77);
     const toolSendIndex = calls.findIndex(
@@ -1594,7 +1592,7 @@ test("Verbose activity uses follower transport and loses stale registration auth
   await runtime.waitForIdle();
   assert.deepEqual(
     followerCalls.map((call) => call.args[0]),
-    ["sendMessage", "sendRichMessage"],
+    ["sendRichMessage", "sendRichMessage"],
   );
   const thinkingBody = followerCalls[0]?.args[1] as
     | Record<string, unknown>

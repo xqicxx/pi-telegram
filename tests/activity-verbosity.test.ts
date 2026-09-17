@@ -8,7 +8,7 @@ import test from "node:test";
 import {
   createTelegramActivityVerbosityBinding,
   createTelegramActivityVerbosityRuntime,
-  renderTelegramThinkingActivityHtml,
+  renderTelegramThinkingRichBlocks,
   renderTelegramToolActivityHtml,
   renderTelegramToolActivityRichMessage,
   TELEGRAM_ACTIVITY_MESSAGE_MAX_TOOLS,
@@ -153,13 +153,14 @@ for (const outcome of ["resolve", "reject"] as const) {
       sendRichMessage: async (body) => {
         const id = ++nextId;
         effects.push(body);
-        if (id === 1 && stage === "tool-send") await pause();
+        if (id === 1 && (stage === "tool-send" || stage === "reasoning-end")) {
+          await pause();
+        }
         return { message_id: id };
       },
       sendMessage: async (body) => {
         const id = ++nextId;
         effects.push(body);
-        if (id === 1 && stage === "reasoning-end") await pause();
         return { message_id: id };
       },
       editMessageText: async (body) => {
@@ -456,7 +457,7 @@ test("known-safe Rich rejection falls back to the HTML tool message", async () =
   assert.match(harness.sends[0]?.text ?? "", /<blockquote expandable>/);
 });
 
-test("reasoning uses a persistent target-bound expandable HTML message", async () => {
+test("reasoning uses a persistent collapsed disclosure message", async () => {
   const harness = createHarness({ mode: "thinking" });
   harness.runtime.accept(event(1, { type: "agent-start" }));
   harness.runtime.accept(
@@ -481,24 +482,27 @@ test("reasoning uses a persistent target-bound expandable HTML message", async (
     }),
   );
   await harness.runtime.waitForIdle();
-  assert.equal(harness.sends.length, 1);
-  assert.equal(harness.sends[0]?.chat_id, 42);
-  assert.equal(harness.sends[0]?.message_thread_id, 7);
-  assert.deepEqual(harness.sends[0]?.link_preview_options, {
+  assert.equal(harness.sends.length, 0);
+  assert.equal(harness.richSends.length, 1);
+  assert.equal(harness.richSends[0]?.chat_id, 42);
+  assert.equal(harness.richSends[0]?.message_thread_id, 7);
+  assert.deepEqual(harness.richSends[0]?.link_preview_options, {
     is_disabled: true,
   });
-  assert.match(
-    harness.sends[0]?.text ?? "",
-    /^<b>🧠 Thinking<\/b>/,
-  );
-  assert.match(harness.sends[0]?.text ?? "", /<blockquote expandable>/);
+  assert.match(JSON.stringify(harness.richSends[0]?.rich_message), /🧠 Thinking/);
   assert.equal(harness.edits.length, 1);
-  assert.match(harness.edits[0]?.text ?? "", /Checking <b>state<\/b>/);
-  assert.equal(harness.edits[0]?.parse_mode, "HTML");
-  assert.deepEqual(harness.edits[0]?.link_preview_options, {
-    is_disabled: true,
-  });
-  assert.equal(harness.edits[0]?.rich_message, undefined);
+  assert.equal(harness.edits[0]?.text, undefined);
+  assert.deepEqual(harness.edits[0]?.rich_message?.blocks, [
+    {
+      type: "details",
+      summary: [
+        { type: "bold", text: "🧠 Thinking" },
+        " ",
+        { type: "code", text: "Checking state" },
+      ],
+      blocks: [{ type: "paragraph", text: "Checking **state**" }],
+    },
+  ]);
 });
 
 test("agent end leaves an already current thinking message unchanged", async () => {
@@ -513,10 +517,11 @@ test("agent end leaves an already current thinking message unchanged", async () 
   );
   harness.runtime.accept(event(3, { type: "agent-end" }));
   await harness.runtime.waitForIdle();
-  assert.equal(harness.sends.length, 1);
+  assert.equal(harness.richSends.length, 1);
   assert.equal(harness.edits.length, 0);
-  assert.match(harness.sends[0]?.text ?? "", /^<b>🧠 Thinking<\/b>/);
-  assert.match(harness.sends[0]?.text ?? "", /<blockquote expandable>/);
+  const serialized = JSON.stringify(harness.richSends[0]?.rich_message);
+  assert.match(serialized, /🧠 Thinking/);
+  assert.match(serialized, /still thinking/);
 });
 
 test("agent start refreshes file-backed mode before activity isolation", async () => {
@@ -539,9 +544,9 @@ test("agent start refreshes file-backed mode before activity isolation", async (
     }),
   );
   await harness.runtime.waitForIdle();
-  const text = harness.sends.map((body) => body.text).join("\n");
-  assert.equal(text.includes("<blockquote expandable>"), true);
-  assert.equal(text.includes("<b>Read:</b>"), false);
+  const activity = JSON.stringify([harness.sends, harness.richSends]);
+  assert.equal(activity.includes("🧠 Thinking"), true);
+  assert.equal(activity.includes("Read:"), false);
 });
 
 test("activity fails closed when file-backed mode refresh fails", async () => {
@@ -584,30 +589,41 @@ test("thinking and tools modes isolate their activity classes", async () => {
       }),
     );
     await harness.runtime.waitForIdle();
-    const thinkingText = harness.sends.map((body) => body.text).join("\n");
-    const toolText = JSON.stringify(harness.richSends);
-    assert.equal(
-      thinkingText.includes("<blockquote expandable>"),
-      mode === "thinking",
-    );
-    assert.equal(toolText.includes("Read:"), mode === "tools");
+    const activity = JSON.stringify([harness.sends, harness.richSends]);
+    assert.equal(activity.includes("🧠 Thinking"), mode === "thinking");
+    assert.equal(activity.includes("Read:"), mode === "tools");
   }
 });
 
-test("reasoning evidence renders inline HTML inside an expandable quote", () => {
-  const html = renderTelegramThinkingActivityHtml(
+test("reasoning renders one collapsed details block with a snippet", () => {
+  const blocks = renderTelegramThinkingRichBlocks(
     "**Reviewing data models**\na < b\n<https://example.com>",
   );
-  assert.match(
-    html,
-    /^<b>🧠 Thinking<\/b> <code>Reviewing data models<\/code>/,
-  );
-  assert.match(
-    html,
-    /<blockquote expandable><b>Reviewing data models<\/b>\na &lt; b/,
-  );
-  assert.equal(html.includes("https://\u200bexample.com"), true);
-  assert.doesNotMatch(html, /<a |rich_message/);
+  assert.deepEqual(blocks, [
+    {
+      type: "details",
+      summary: [
+        { type: "bold", text: "🧠 Thinking" },
+        " ",
+        { type: "code", text: "Reviewing data models" },
+      ],
+      blocks: [
+        {
+          type: "paragraph",
+          text: "**Reviewing data models**\na < b\n<https://example.com>",
+        },
+      ],
+    },
+  ]);
+
+  const empty = renderTelegramThinkingRichBlocks("   ");
+  assert.deepEqual(empty, [
+    {
+      type: "details",
+      summary: [{ type: "bold", text: "🧠 Thinking" }],
+      blocks: [{ type: "paragraph", text: "   " }],
+    },
+  ]);
 });
 
 test("completed consecutive tools coalesce as collapsed redacted details", async () => {
@@ -835,11 +851,14 @@ test("reasoning and tool updates retain bounded latest evidence", async () => {
   );
   await harness.runtime.waitForIdle();
 
-  const reasoning = harness.sends[0]?.text ?? "";
-  assert.match(reasoning, /earlier chars omitted/);
+  const rich = harness.richSends.map((body) =>
+    JSON.stringify(body.rich_message),
+  );
+  const reasoning = rich.find((body) => body.includes("🧠 Thinking")) ?? "";
+  assert.doesNotMatch(reasoning, /earlier chars omitted/);
   assert.match(reasoning, /latest-marker/);
   assert.doesNotMatch(reasoning, /old-marker/);
-  const tool = JSON.stringify(harness.richSends[0]?.rich_message);
+  const tool = rich.find((body) => body.includes("Exec:")) ?? "";
   assert.match(tool, /3 earlier omitted/);
   assert.doesNotMatch(tool, /update-0/);
   assert.match(tool, /update-6/);
@@ -856,7 +875,7 @@ test("reasoning edits are throttled to a minimum interval between frames", async
     }),
   );
   await harness.runtime.waitForIdle();
-  assert.equal(harness.sends.length, 1);
+  assert.equal(harness.richSends.length, 1);
   harness.runtime.accept(
     event(3, {
       type: "reasoning-delta",
@@ -913,13 +932,13 @@ test("reset drops accepted events that have not started processing", async () =>
     captureAuthority: () => 1,
     isAuthorityActive: () => true,
     async sendMessage(body) {
-      if (body.text.includes("<blockquote expandable>")) {
-        await reasoningBlocked;
-      }
       sends.push(body);
       return { message_id: 1 };
     },
     async sendRichMessage(body) {
+      if (JSON.stringify(body.rich_message).includes("🧠 Thinking")) {
+        await reasoningBlocked;
+      }
       richSends.push(body);
       return { message_id: 2 };
     },
