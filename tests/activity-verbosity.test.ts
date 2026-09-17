@@ -620,7 +620,7 @@ test("reasoning uses a persistent collapsed disclosure message", async () => {
           align: "center",
           buttons: [
             {
-              text: `收起${"　".repeat(8)}`,
+              text: `收起 ${"─".repeat(20)}`,
               callback_data: "think:fold:101",
             },
           ],
@@ -653,10 +653,7 @@ test("agent end folds the thinking card the reader may have opened", async () =>
   assert.match(JSON.stringify(fold?.rich_message), /still thinking/);
   assert.match(JSON.stringify(fold?.rich_message), /展开全文/);
   assert.deepEqual(fold?.reply_markup, undefined);
-  assert.match(
-    JSON.stringify(fold?.rich_message),
-    /"type":"buttons"/,
-  );
+  assert.match(JSON.stringify(fold?.rich_message), /"type":"buttons"/);
 });
 
 test("agent start refreshes file-backed mode before activity isolation", async () => {
@@ -795,7 +792,7 @@ test("a 收起 request folds the card through the live runtime", async () => {
   assert.deepEqual(fold?.reply_markup, undefined);
   assert.match(
     JSON.stringify(fold?.rich_message),
-    new RegExp(`收起${"　".repeat(9)}`),
+    new RegExp(`"style":"primary"`),
   );
 
   // A tap from another chat must not fold someone else's card.

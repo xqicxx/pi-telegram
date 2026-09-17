@@ -410,6 +410,8 @@ export function thinkingFoldKeyboard(
  * get an inside-the-bubble control that reads as full width. `alternate` shifts
  * the padding by one cell so a repeat tap is a changed payload.
  */
+const TELEGRAM_THINKING_FOLD_RULE = "─".repeat(20);
+
 function thinkingFoldButtonBlock(
   messageId: number,
   alternate = false,
@@ -419,7 +421,11 @@ function thinkingFoldButtonBlock(
     align: "center",
     buttons: [
       {
-        text: `收起${"　".repeat(alternate ? 9 : 8)}`,
+        // Trailing spaces are trimmed by the client, so the label is widened
+        // with rule glyphs; the style toggle keeps repeat taps a *changed*
+        // payload, which is what Telegram requires to accept the fold edit.
+        text: `收起 ${TELEGRAM_THINKING_FOLD_RULE}`,
+        ...(alternate ? { style: "primary" as const } : {}),
         callback_data: `${TELEGRAM_THINKING_FOLD_CALLBACK_PREFIX}${messageId}`,
       },
     ],
