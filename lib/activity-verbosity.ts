@@ -4,7 +4,10 @@
  * Owns persistent bounded thinking and tool disclosures; excludes activity normalization, assistant answer rendering, and transport authority policy
  */
 
-import type { TelegramActivityEvent, TelegramActivityPublicationRuntime } from "./activity.ts";
+import type {
+  TelegramActivityEvent,
+  TelegramActivityPublicationRuntime,
+} from "./activity.ts";
 import { escapeHtml } from "./rendering.ts";
 import type {
   TelegramEditMessageTextBody,
@@ -20,7 +23,7 @@ export const TELEGRAM_ACTIVITY_DETAIL_MAX_CHARS = 1_200;
 export const TELEGRAM_ACTIVITY_MESSAGE_MAX_CHARS = 3_900;
 export const TELEGRAM_ACTIVITY_MESSAGE_MAX_TOOLS = 6;
 export const TELEGRAM_REASONING_MESSAGE_MAX_FRAMES = 24;
-export const TELEGRAM_REASONING_BUFFER_MAX_CHARS = 1_200;
+export const TELEGRAM_REASONING_BUFFER_MAX_CHARS = 3_600;
 export const TELEGRAM_REASONING_MIN_INTERVAL_MS = 1_200;
 export const TELEGRAM_TOOL_UPDATE_MAX_ENTRIES = 4;
 
@@ -54,10 +57,7 @@ function targetEquals(left: TelegramTarget, right: TelegramTarget): boolean {
 function redactActivityText(text: string): string {
   return text
     .replace(/\b\d{8,12}:[A-Za-z0-9_-]{30,}\b/g, "[REDACTED_BOT_TOKEN]")
-    .replace(
-      /\b(Bearer\s+)[A-Za-z0-9._~+/=-]{16,}\b/gi,
-      "$1[REDACTED]",
-    )
+    .replace(/\b(Bearer\s+)[A-Za-z0-9._~+/=-]{16,}\b/gi, "$1[REDACTED]")
     .replace(
       /(["']?(?:api[_-]?key|token|password|secret)["']?\s*[:=]\s*["']?)[^"',\s}]+/gi,
       "$1[REDACTED]",
@@ -88,9 +88,7 @@ function formatActivityJson(value: unknown, depth = 0): string[] {
             lines[lines.length - 1] += ",";
           }
         });
-        lines.push(
-          index < value.length - 1 ? `${indent}}, {` : `${indent}}]`,
-        );
+        lines.push(index < value.length - 1 ? `${indent}}, {` : `${indent}}]`);
       });
       return lines;
     }
@@ -129,17 +127,14 @@ function serializeActivityValue(value: unknown): string {
   let text: string;
   try {
     const normalized =
-      JSON.stringify(
-        value,
-        (_key, nested) => {
-          if (typeof nested === "bigint") return nested.toString();
-          if (nested && typeof nested === "object") {
-            if (seen.has(nested)) return "[Circular]";
-            seen.add(nested);
-          }
-          return nested;
-        },
-      ) ?? JSON.stringify(String(value));
+      JSON.stringify(value, (_key, nested) => {
+        if (typeof nested === "bigint") return nested.toString();
+        if (nested && typeof nested === "object") {
+          if (seen.has(nested)) return "[Circular]";
+          seen.add(nested);
+        }
+        return nested;
+      }) ?? JSON.stringify(String(value));
     text = formatActivityJson(JSON.parse(normalized)).join("\n");
   } catch {
     text = JSON.stringify(String(value));
@@ -178,18 +173,12 @@ function renderToolActivityHtml(tool: ToolActivity): string {
     evidence.push(`… [${tool.droppedUpdates} earlier updates omitted]`);
   }
   tool.updates.forEach((update, index) => {
-    evidence.push(
-      `"update ${tool.droppedUpdates + index + 1}": ${update}`,
-    );
+    evidence.push(`"update ${tool.droppedUpdates + index + 1}": ${update}`);
   });
   if (tool.complete && tool.result !== undefined) {
     evidence.push(`"${tool.isError ? "error" : "result"}": ${tool.result}`);
   }
-  const status = tool.complete
-    ? tool.isError
-      ? "failed"
-      : "done"
-    : "running";
+  const status = tool.complete ? (tool.isError ? "failed" : "done") : "running";
   return [
     `<b>${escapeHtml(formatToolActivityLabel(tool.name))}:</b> <code>${status}</code>`,
     `<blockquote expandable>${escapeActivityEvidenceHtml(evidence.join("\n\n"))}</blockquote>`,
@@ -239,11 +228,7 @@ function createToolActivityDetail(
 function renderToolActivityRichBlocks(
   tool: ToolActivity,
 ): TelegramInputRichBlock[] {
-  const status = tool.complete
-    ? tool.isError
-      ? "failed"
-      : "done"
-    : "running";
+  const status = tool.complete ? (tool.isError ? "failed" : "done") : "running";
   // Arguments start collapsed: the row stays one line until the operator taps it.
   const evidenceBlocks: TelegramInputRichBlock[] = [
     createToolActivityDetail("arguments", tool.args),
@@ -274,7 +259,9 @@ function renderToolActivityRichBlocks(
         },
         " ",
         { type: "code", text: status },
-        ...(hint ? ([" ", { type: "code" as const, text: hint }] as const) : []),
+        ...(hint
+          ? ([" ", { type: "code" as const, text: hint }] as const)
+          : []),
       ],
       blocks: evidenceBlocks,
     },
@@ -295,46 +282,54 @@ function toolMessageSize(tools: readonly ToolActivity[]): number {
 }
 
 function isKnownSafeRichActivityRejection(error: unknown): boolean {
-  return error instanceof Error && /HTTP 400: Bad Request:/i.test(error.message);
+  return (
+    error instanceof Error && /HTTP 400: Bad Request:/i.test(error.message)
+  );
 }
 
 /** One-line hint so a collapsed thinking card still says where it started. */
 function thinkingActivitySnippet(text: string): string | undefined {
   const firstLine = text.split("\n").find((line) => line.trim() !== "") ?? "";
-  const flat = firstLine.replace(/\s+/gu, " ").replace(/[*_`#]+/gu, "").trim();
+  const flat = firstLine
+    .replace(/\s+/gu, " ")
+    .replace(/[*_`#]+/gu, "")
+    .trim();
   if (!flat) return undefined;
   return flat.length > 60 ? `${flat.slice(0, 59)}…` : flat;
 }
 
 /**
- * Thinking message: a native collapsed disclosure row — snippet in the summary,
- * reasoning inside — instead of a quoted HTML wall. The client owns the toggle,
- * so the transcript stays scannable without an extra API call per frame.
+ * Thinking message: a native disclosure row — snippet in the summary, reasoning
+ * inside — instead of a quoted HTML wall. While reasoning streams the row is
+ * open so each frame reads like a live tail; the final frame collapses it to
+ * one line. Bot API details blocks carry no tap callback, so a manual collapse
+ * mid-stream lasts only until the next frame.
  */
 export function renderTelegramThinkingRichBlocks(
   text: string,
+  options: { open?: boolean } = {},
 ): TelegramInputRichBlock[] {
   const snippet = thinkingActivitySnippet(text);
-  return [
-    {
-      type: "details",
-      summary: [
-        { type: "bold", text: "🧠 Thinking" },
-        ...(snippet
-          ? ([" ", { type: "code" as const, text: snippet }] as const)
-          : []),
-      ],
-      blocks: [{ type: "paragraph", text }],
-    },
-  ];
+  const details = {
+    type: "details" as const,
+    summary: [
+      { type: "bold" as const, text: "🧠 Thinking" },
+      ...(snippet
+        ? ([" ", { type: "code" as const, text: snippet }] as const)
+        : []),
+    ],
+    blocks: [{ type: "paragraph" as const, text }],
+  };
+  return [options.open ? { ...details, is_open: true as const } : details];
 }
 
 /** Reasoning body for one message: the whole buffer, or its bounded tail. */
 function buildTelegramThinkingRichMessage(
   text: string,
+  open: boolean,
 ): TelegramInputRichMessage {
   return {
-    blocks: renderTelegramThinkingRichBlocks(text),
+    blocks: renderTelegramThinkingRichBlocks(text, { open }),
     skip_entity_detection: true,
   };
 }
@@ -407,6 +402,7 @@ export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
   let target: TelegramTarget | undefined;
   let reasoningBuffer = "";
   let reasoningChars = 0;
+  let reasoningOpen = false;
   let reasoningMessageFrames = 0;
   let lastReasoningMessageChars = 0;
   let reasoningMessage: ReasoningMessage | undefined;
@@ -433,8 +429,14 @@ export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
   };
   const hasAuthority = (): boolean =>
     authority !== undefined && deps.isAuthorityActive(authority);
-  const isCurrent = (acceptedGeneration: number, admittedAuthority: TAuthority | undefined): boolean =>
-    active && generation === acceptedGeneration && admittedAuthority !== undefined && deps.isAuthorityActive(admittedAuthority);
+  const isCurrent = (
+    acceptedGeneration: number,
+    admittedAuthority: TAuthority | undefined,
+  ): boolean =>
+    active &&
+    generation === acceptedGeneration &&
+    admittedAuthority !== undefined &&
+    deps.isAuthorityActive(admittedAuthority);
   const ensureActivity = (
     event: TelegramActivityEvent,
     admittedTarget: TelegramTarget | undefined,
@@ -465,15 +467,17 @@ export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
       return;
     }
     let retained = reasoningBuffer;
-    let message = buildTelegramThinkingRichMessage(retained);
+    let message = buildTelegramThinkingRichMessage(retained, reasoningOpen);
     do {
       const omitted = reasoningChars - retained.length;
       const text = redactActivityText(
         omitted > 0 ? `…\n${retained}` : retained,
       );
-      message = buildTelegramThinkingRichMessage(text);
+      message = buildTelegramThinkingRichMessage(text, reasoningOpen);
       if (text.length <= TELEGRAM_ACTIVITY_MESSAGE_MAX_CHARS) break;
-      retained = retained.slice(-Math.max(1, Math.floor(retained.length * 0.75)));
+      retained = retained.slice(
+        -Math.max(1, Math.floor(retained.length * 0.75)),
+      );
     } while (retained.length > 1);
     const canEdit =
       reasoningMessage && targetEquals(reasoningMessage.target, target);
@@ -645,11 +649,13 @@ export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
     }
     if (event.type === "reasoning-delta") {
       if (!showThinking) return;
+      reasoningOpen = true;
       reasoningChars += event.delta.length;
       reasoningBuffer = `${reasoningBuffer}${event.delta}`.slice(
         -TELEGRAM_REASONING_BUFFER_MAX_CHARS,
       );
-      if (reasoningMessageFrames < TELEGRAM_REASONING_MESSAGE_MAX_FRAMES &&
+      if (
+        reasoningMessageFrames < TELEGRAM_REASONING_MESSAGE_MAX_FRAMES &&
         (reasoningMessageFrames === 0 ||
           (getNowMs() - lastReasoningPublishMs >=
             TELEGRAM_REASONING_MIN_INTERVAL_MS &&
@@ -661,6 +667,9 @@ export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
     }
     if (event.type === "reasoning-end") {
       if (!showThinking) return;
+      // The closing frame collapses the row: the operator sees one summary line
+      // and can tap to read the whole reasoning.
+      reasoningOpen = false;
       if (reasoningChars === 0 && event.text) {
         reasoningChars = event.text.length;
         reasoningBuffer = event.text.slice(
@@ -752,14 +761,24 @@ export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
       const resolvedTarget = deps.resolveTarget(event);
       const admittedTarget = resolvedTarget ? { ...resolvedTarget } : undefined;
       const admittedAuthority = deps.captureAuthority();
-      const enqueue = deps.enqueue ?? ((task: () => Promise<void>) => tail.then(task));
+      const enqueue =
+        deps.enqueue ?? ((task: () => Promise<void>) => tail.then(task));
       tail = enqueue(async () => {
-          if (!active || generation !== acceptedGeneration || !deps.isAuthorityActive(admittedAuthority)) return;
-          await process(event, acceptedGeneration, admittedTarget, admittedAuthority);
-        })
-        .catch((error) => {
-          deps.recordFailure?.("tool-send", event, error);
-        });
+        if (
+          !active ||
+          generation !== acceptedGeneration ||
+          !deps.isAuthorityActive(admittedAuthority)
+        )
+          return;
+        await process(
+          event,
+          acceptedGeneration,
+          admittedTarget,
+          admittedAuthority,
+        );
+      }).catch((error) => {
+        deps.recordFailure?.("tool-send", event, error);
+      });
     },
     reset() {
       generation += 1;
