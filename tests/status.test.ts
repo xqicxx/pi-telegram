@@ -3,6 +3,7 @@
  * Covers runtime diagnostics lines and recent-event redaction/ring-buffer behavior
  */
 
+import { splitTelegramStatusCard } from "../lib/status.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -1600,4 +1601,23 @@ test("Status runtime skips the status bar when the host theme is uninitialized",
 
   assert.doesNotThrow(() => runtime.updateStatus(ctx as never));
   assert.deepEqual(events, []);
+});
+
+test("status card splits into a preface and real table rows", () => {
+  const card = [
+    "<b>Pi 控制台</b>",
+    "/status — 查看状态",
+    "<b>Status:</b> <code>idle</code>",
+    "<b>Context:</b> <code>23%</code>",
+    "<blockquote expandable><b>Tokens:</b> <code>↑250 ↓50</code>",
+    "<b>Cache:</b> <code>R1.7k</code></blockquote>",
+  ].join("\n");
+  const split = splitTelegramStatusCard(card);
+  assert.ok(split, "card with rows must split");
+  assert.equal(split.rows.length, 4);
+  assert.deepEqual(split.rows[0], { label: "Status", value: "idle" });
+  assert.deepEqual(split.rows[3], { label: "Cache", value: "R1.7k" });
+  assert.match(split.prelude, /Pi 控制台/);
+  assert.doesNotMatch(split.prelude, /<b>|<code>/);
+  assert.equal(splitTelegramStatusCard("<b>no rows here</b>"), undefined);
 });

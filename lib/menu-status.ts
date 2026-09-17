@@ -5,7 +5,7 @@
  */
 
 import { buildTelegramTableBlock } from "./rich-blocks.ts";
-import { parseTelegramStatusRows } from "./status.ts";
+import { splitTelegramStatusCard } from "./status.ts";
 import { formatTelegramCommandEmojiPrefix } from "./commands.ts";
 import {
   getTelegramSectionMainMenuRows,
@@ -215,11 +215,14 @@ export function buildTelegramStatusMenuRenderPayload(
 ): TelegramMenuRenderPayload {
   // A card whose rows all match the row shape becomes a native table; anything
   // else keeps the HTML card instead of a half-parsed table.
-  const rows = parseTelegramStatusRows(statusText);
-  const statusBlocks = rows
+  const card = splitTelegramStatusCard(statusText);
+  const statusBlocks = card
     ? [
+        ...(card.prelude
+          ? [{ type: "paragraph" as const, text: card.prelude }]
+          : []),
         buildTelegramTableBlock({
-          rows: rows.map((row) => [row.label, row.value]),
+          rows: card.rows.map((row) => [row.label, row.value]),
           bordered: true,
           striped: true,
           compact: true,

@@ -1644,17 +1644,32 @@ export function buildStatusHtml(
  * row has a different shape, so callers keep the HTML card instead of rendering
  * a table the data does not support.
  */
-export function parseTelegramStatusRows(
+export interface TelegramStatusCardSplit {
+  /** Non-row lines with tags stripped; empty for a rows-only card. */
+  prelude: string;
+  rows: Array<{ label: string; value: string }>;
+}
+
+/**
+ * Split a status card into its preface and its label/value rows. Returns
+ * undefined when the card carries no rows, so callers keep the HTML card
+ * instead of rendering a table the data does not support.
+ */
+export function splitTelegramStatusCard(
   statusHtml: string,
-): Array<{ label: string; value: string }> | undefined {
+): TelegramStatusCardSplit | undefined {
   const rows: Array<{ label: string; value: string }> = [];
+  const prelude: string[] = [];
   const body = statusHtml.replace(/<\/?blockquote[^>]*>/gu, "");
   for (const line of body.split("\n")) {
     if (line.trim() === "") continue;
     const match = line.match(/^<b>([^<]+):<\/b> <code>(.*)<\/code>$/u);
-    if (!match) return undefined;
-    rows.push({ label: match[1]!, value: match[2]! });
+    if (match) {
+      rows.push({ label: match[1]!, value: match[2]! });
+      continue;
+    }
+    prelude.push(line.replace(/<[^>]+>/gu, "").trim());
   }
-  return rows.length > 0 ? rows : undefined;
+  if (rows.length === 0) return undefined;
+  return { prelude: prelude.filter((item) => item !== "").join("\n"), rows };
 }
-
