@@ -590,13 +590,10 @@ test("reasoning uses a persistent collapsed disclosure message", async () => {
   assert.equal(harness.edits.length, 1);
   assert.equal(harness.edits[0]?.text, undefined);
   assert.deepEqual(harness.edits[0]?.rich_message?.blocks, [
+    { type: "paragraph", text: [{ type: "bold", text: "🧠 Thinking" }] },
     {
       type: "details",
-      summary: [
-        { type: "bold", text: "🧠 Thinking" },
-        " ",
-        { type: "code", text: "Checking state" },
-      ],
+      summary: "展开全文",
       blocks: [{ type: "paragraph", text: "Checking **state**" }],
     },
   ]);
@@ -692,33 +689,14 @@ test("thinking and tools modes isolate their activity classes", async () => {
   }
 });
 
-test("reasoning renders one collapsed details block with a snippet", () => {
-  const blocks = renderTelegramThinkingRichBlocks(
-    "**Reviewing data models**\na < b\n<https://example.com>",
-  );
-  assert.deepEqual(blocks, [
+test("reasoning keeps its label on its own line above a collapsed body", () => {
+  const text = "**Reviewing data models**\na < b\n<https://example.com>";
+  assert.deepEqual(renderTelegramThinkingRichBlocks(text), [
+    { type: "paragraph", text: [{ type: "bold", text: "🧠 Thinking" }] },
     {
       type: "details",
-      summary: [
-        { type: "bold", text: "🧠 Thinking" },
-        " ",
-        { type: "code", text: "Reviewing data models" },
-      ],
-      blocks: [
-        {
-          type: "paragraph",
-          text: "**Reviewing data models**\na < b\n<https://example.com>",
-        },
-      ],
-    },
-  ]);
-
-  const empty = renderTelegramThinkingRichBlocks("   ");
-  assert.deepEqual(empty, [
-    {
-      type: "details",
-      summary: [{ type: "bold", text: "🧠 Thinking" }],
-      blocks: [{ type: "paragraph", text: "   " }],
+      summary: "展开全文",
+      blocks: [{ type: "paragraph", text }],
     },
   ]);
 });

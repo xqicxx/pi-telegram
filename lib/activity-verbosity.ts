@@ -293,36 +293,20 @@ function isKnownSafeRichActivityRejection(error: unknown): boolean {
   );
 }
 
-/** One-line hint so a collapsed thinking card still says where it started. */
-function thinkingActivitySnippet(text: string): string | undefined {
-  const firstLine = text.split("\n").find((line) => line.trim() !== "") ?? "";
-  const flat = firstLine
-    .replace(/\s+/gu, " ")
-    .replace(/[*_`#]+/gu, "")
-    .trim();
-  if (!flat) return undefined;
-  return flat.length > 60 ? `${flat.slice(0, 59)}…` : flat;
-}
-
 /**
- * Thinking message: a native collapsed disclosure row — snippet in the summary,
- * reasoning inside. Keeping it closed is what separates the reasoning from the
- * tool card: an open body streams into the tool rows and the two read as one
- * wall of text.
+ * Thinking message: a label line of its own, then a collapsed body. Putting the
+ * label on its own line is what separates reasoning from the tool card — the
+ * tool rows are collapsed disclosures with the tool name in the summary, so a
+ * thinking row shaped the same way reads as one more tool call.
  */
 export function renderTelegramThinkingRichBlocks(
   text: string,
 ): TelegramInputRichBlock[] {
-  const snippet = thinkingActivitySnippet(text);
   return [
+    { type: "paragraph", text: [{ type: "bold", text: "🧠 Thinking" }] },
     {
       type: "details",
-      summary: [
-        { type: "bold", text: "🧠 Thinking" },
-        ...(snippet
-          ? ([" ", { type: "code" as const, text: snippet }] as const)
-          : []),
-      ],
+      summary: "展开全文",
       blocks: [{ type: "paragraph", text }],
     },
   ];
