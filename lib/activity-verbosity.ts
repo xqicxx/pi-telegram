@@ -293,17 +293,35 @@ function isKnownSafeRichActivityRejection(error: unknown): boolean {
   );
 }
 
+/** Chars of reasoning shown under the label before the collapsed full body. */
+export const TELEGRAM_THINKING_PREVIEW_MAX_CHARS = 160;
+
 /**
- * Thinking message: a label line of its own, then a collapsed body. Putting the
- * label on its own line is what separates reasoning from the tool card — the
- * tool rows are collapsed disclosures with the tool name in the summary, so a
+ * Opening lines of the reasoning, so the card says something without a tap.
+ * The tail is always kept: the reasoning that matters is the newest text.
+ */
+export function thinkingActivityPreview(text: string): string | undefined {
+  const flat = text.replace(/\n{3,}/gu, "\n\n").trim();
+  if (!flat) return undefined;
+  if (flat.length <= TELEGRAM_THINKING_PREVIEW_MAX_CHARS) return flat;
+  const tail = flat.slice(-TELEGRAM_THINKING_PREVIEW_MAX_CHARS);
+  const firstBreak = tail.indexOf("\n");
+  return `…${firstBreak >= 0 ? tail.slice(firstBreak + 1) : tail}`;
+}
+
+/**
+ * Thinking message: a label line, a few lines of live preview, then a collapsed
+ * body. The label on its own line is what separates reasoning from the tool
+ * card — tool rows are collapsed disclosures led by the tool name, so a
  * thinking row shaped the same way reads as one more tool call.
  */
 export function renderTelegramThinkingRichBlocks(
   text: string,
 ): TelegramInputRichBlock[] {
+  const preview = thinkingActivityPreview(text);
   return [
     { type: "paragraph", text: [{ type: "bold", text: "🧠 Thinking" }] },
+    ...(preview ? ([{ type: "paragraph" as const, text: preview }]) : []),
     {
       type: "details",
       summary: "展开全文",

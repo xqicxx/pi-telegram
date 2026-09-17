@@ -13,7 +13,9 @@ import {
   renderTelegramToolActivityRichMessage,
   TELEGRAM_ACTIVITY_MESSAGE_MAX_TOOLS,
   TELEGRAM_REASONING_BUFFER_MAX_CHARS,
+  TELEGRAM_THINKING_PREVIEW_MAX_CHARS,
   TELEGRAM_TOOL_UPDATE_MAX_ENTRIES,
+  thinkingActivityPreview,
 } from "../lib/activity-verbosity.ts";
 import type {
   TelegramActivityEvent,
@@ -591,6 +593,7 @@ test("reasoning uses a persistent collapsed disclosure message", async () => {
   assert.equal(harness.edits[0]?.text, undefined);
   assert.deepEqual(harness.edits[0]?.rich_message?.blocks, [
     { type: "paragraph", text: [{ type: "bold", text: "🧠 Thinking" }] },
+    { type: "paragraph", text: "Checking **state**" },
     {
       type: "details",
       summary: "展开全文",
@@ -693,12 +696,27 @@ test("reasoning keeps its label on its own line above a collapsed body", () => {
   const text = "**Reviewing data models**\na < b\n<https://example.com>";
   assert.deepEqual(renderTelegramThinkingRichBlocks(text), [
     { type: "paragraph", text: [{ type: "bold", text: "🧠 Thinking" }] },
+    { type: "paragraph", text },
     {
       type: "details",
       summary: "展开全文",
       blocks: [{ type: "paragraph", text }],
     },
   ]);
+});
+
+test("preview keeps the newest reasoning lines and drops blank padding", () => {
+  const short = "line one\nline two";
+  assert.equal(thinkingActivityPreview(short), short);
+  assert.equal(thinkingActivityPreview("  \n\n  "), undefined);
+
+  const long = `${"old ".repeat(80)}\n${"new tail sentence. ".repeat(4)}`;
+  const preview = thinkingActivityPreview(long);
+  assert.ok(preview);
+  assert.ok(preview.length <= TELEGRAM_THINKING_PREVIEW_MAX_CHARS + 1);
+  assert.match(preview, /^…/);
+  assert.match(preview, /new tail sentence\./);
+  assert.doesNotMatch(preview, /old old old old old/);
 });
 
 test("completed consecutive tools coalesce as collapsed redacted details", async () => {
