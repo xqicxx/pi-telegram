@@ -8,7 +8,6 @@ import test from "node:test";
 import {
   createTelegramActivityVerbosityBinding,
   createTelegramActivityVerbosityRuntime,
-  renderTelegramThinkingFoldBlocks,
   renderTelegramThinkingRichBlocks,
   renderTelegramToolActivityHtml,
   renderTelegramToolActivityRichMessage,
@@ -599,13 +598,12 @@ test("reasoning uses a persistent collapsed disclosure message", async () => {
         { type: "bold", text: "🧠 Thinking…" },
         " ",
         { type: "code", text: "18 字" },
-        " ",
-        "Checking **state**",
       ],
     },
+    { type: "paragraph", text: "Checking **state**" },
     {
       type: "details",
-      summary: "展开全文",
+      summary: "展开全文 · 18 字",
       blocks: [{ type: "paragraph", text: "Checking **state**" }],
     },
   ]);
@@ -709,13 +707,10 @@ test("thinking and tools modes isolate their activity classes", async () => {
 test("reasoning keeps its label on its own line above a collapsed body", () => {
   const text = "**Reviewing data models**\na < b\n<https://example.com>";
   assert.deepEqual(renderTelegramThinkingRichBlocks(text), [
+    { type: "paragraph", text: [{ type: "bold", text: "🧠 Thinking…" }] },
     {
       type: "paragraph",
-      text: [
-        { type: "bold", text: "🧠 Thinking…" },
-        " ",
-        "**Reviewing data models** a < b <https://example.com>",
-      ],
+      text: "**Reviewing data models** a < b <https://example.com>",
     },
     {
       type: "details",
@@ -725,24 +720,32 @@ test("reasoning keeps its label on its own line above a collapsed body", () => {
   ]);
 });
 
-test("turn-end fold adds the size to the summary so clients re-render closed", () => {
-  assert.deepEqual(renderTelegramThinkingFoldBlocks("body", 1234), [
-    {
-      type: "paragraph",
-      text: [
-        { type: "bold", text: "🧠 Thinking…" },
-        " ",
-        { type: "code", text: "1234 字" },
-        " ",
-        "body",
-      ],
-    },
-    {
-      type: "details",
-      summary: "展开全文 · 1234 字",
-      blocks: [{ type: "paragraph", text: "body" }],
-    },
-  ]);
+test("turn-end digest folds the card and reports size, duration, and tools", () => {
+  assert.deepEqual(
+    renderTelegramThinkingRichBlocks("body", {
+      chars: 1234,
+      tools: 3,
+      durationMs: 42_000,
+      finished: true,
+    }),
+    [
+      {
+        type: "paragraph",
+        text: [
+          { type: "bold", text: "🧠 Thought for 42s" },
+          " ",
+          { type: "code", text: "1,234 字" },
+          " · ",
+          "🛠 3",
+        ],
+      },
+      {
+        type: "details",
+        summary: "展开全文 · 1,234 字",
+        blocks: [{ type: "paragraph", text: "body" }],
+      },
+    ],
+  );
 });
 
 test("preview is one line of the newest reasoning", () => {

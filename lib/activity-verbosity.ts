@@ -13,6 +13,7 @@ import type {
   TelegramEditMessageTextBody,
   TelegramInputRichBlock,
   TelegramInputRichMessage,
+  TelegramRichText,
   TelegramSendMessageBody,
   TelegramSendRichMessageBody,
   TelegramSentMessage,
@@ -309,45 +310,54 @@ export function thinkingActivityPreview(text: string): string | undefined {
     : `…${flat.slice(-TELEGRAM_THINKING_PREVIEW_MAX_CHARS)}`;
 }
 
+export interface TelegramThinkingCardState {
+  chars?: number;
+  tools?: number;
+  durationMs?: number;
+  finished?: boolean;
+}
+
+const formatThinkingChars = (chars: number): string =>
+  `${chars.toLocaleString("en-US")} 字`;
+
 /**
- * Thinking message: one live line (label, size, newest text) plus the full
- * reasoning behind a disclosure. Keeping the card to a single row is what
- * separates reasoning from the tool card — tool rows are collapsed disclosures
- * led by the tool name, so a thinking row shaped the same way reads as one more
- * tool call.
+ * Thinking message: a headline line, the newest reasoning while it streams, and
+ * the full text behind a disclosure. The headline is what separates reasoning
+ * from the tool card — tool rows are disclosures led by the tool name, so a
+ * thinking row shaped the same way reads as one more tool call. When the turn
+ * ends the headline becomes a digest (duration, size, tool count) and the
+ * preview drops, leaving one calm line the reader never has to fold.
  */
 export function renderTelegramThinkingRichBlocks(
   text: string,
-  options: { chars?: number; folded?: boolean } = {},
+  state: TelegramThinkingCardState = {},
 ): TelegramInputRichBlock[] {
-  const preview = thinkingActivityPreview(text);
-  const size = options.chars && options.chars > 0 ? options.chars : undefined;
-  return [
-    {
-      type: "paragraph",
-      text: [
-        { type: "bold", text: "🧠 Thinking…" },
-        ...(size
-          ? ([" ", { type: "code" as const, text: `${size} 字` }] as const)
-          : []),
-        ...(preview ? ([" ", preview] as const) : []),
-      ],
-    },
-    {
-      type: "details",
-      summary: size && options.folded ? `展开全文 · ${size} 字` : "展开全文",
-      blocks: [{ type: "paragraph", text }],
-    },
+  const chars =
+    state.chars && state.chars > 0 ? formatThinkingChars(state.chars) : undefined;
+  const head: TelegramRichText[] = [
+    state.finished
+      ? {
+          type: "bold",
+          text: `🧠 Thought for ${Math.max(
+            1,
+            Math.round((state.durationMs ?? 0) / 1000),
+          )}s`,
+        }
+      : { type: "bold", text: "🧠 Thinking…" },
   ];
-}
-
-/** Turn-end rewrite: same body, summary gains the size so clients re-render
- * collapsed instead of staying open where the reader scrolled. */
-export function renderTelegramThinkingFoldBlocks(
-  text: string,
-  chars: number,
-): TelegramInputRichBlock[] {
-  return renderTelegramThinkingRichBlocks(text, { chars, folded: true });
+  if (chars) head.push(" ", { type: "code", text: chars });
+  if (state.finished && state.tools && state.tools > 0) {
+    head.push(" · ", `🛠 ${state.tools}`);
+  }
+  const blocks: TelegramInputRichBlock[] = [{ type: "paragraph", text: head }];
+  const preview = state.finished ? undefined : thinkingActivityPreview(text);
+  if (preview) blocks.push({ type: "paragraph", text: preview });
+  blocks.push({
+    type: "details",
+    summary: chars ? `展开全文 · ${chars}` : "展开全文",
+    blocks: [{ type: "paragraph", text }],
+  });
+  return blocks;
 }
 
 /** Reasoning body for one message: the whole buffer, or its bounded tail. */
@@ -437,8 +447,13 @@ export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
         target: TelegramTarget;
         text: string;
         chars: number;
+        tools: number;
+        durationMs: number;
       }
     | undefined;
+  /** Completed tool calls this turn, shown in the thinking digest. */
+  let turnToolCount = 0;
+  let reasoningStartedMs: number | undefined;
   let reasoningBlocked = false;
   let lastReasoningPublishMs = 0;
   let toolMessage: ToolMessage | undefined;
@@ -455,6 +470,8 @@ export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
     lastReasoningMessageChars = 0;
     reasoningMessage = undefined;
     reasoningFold = undefined;
+    turnToolCount = 0;
+    reasoningStartedMs = undefined;
     reasoningBlocked = false;
     lastReasoningPublishMs = 0;
     toolMessage = undefined;
@@ -552,6 +569,11 @@ export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
           target: { ...reasoningMessage.target },
           text: publishedText,
           chars: reasoningChars,
+          tools: turnToolCount,
+          durationMs:
+            reasoningStartedMs === undefined
+              ? 0
+              : getNowMs() - reasoningStartedMs,
         };
       }
     } catch (error) {
@@ -696,6 +718,7 @@ export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
     }
     if (event.type === "reasoning-delta") {
       if (!showThinking) return;
+      reasoningStartedMs ??= getNowMs();
       reasoningChars += event.delta.length;
       reasoningBuffer = `${reasoningBuffer}${event.delta}`.slice(
         -TELEGRAM_REASONING_BUFFER_MAX_CHARS,
@@ -761,6 +784,7 @@ export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
       return;
     }
     if (event.type === "tool-end") {
+      turnToolCount += 1;
       if (!showTools) return;
       const tool = tools.get(event.toolCallId) ?? {
         id: event.toolCallId,
@@ -805,7 +829,12 @@ export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
             message_id: fold.messageId,
             rich_message: buildTelegramThinkingRichMessage(
               fold.text,
-              renderTelegramThinkingFoldBlocks(fold.text, fold.chars),
+              renderTelegramThinkingRichBlocks(fold.text, {
+                chars: fold.chars,
+                tools: fold.tools,
+                durationMs: fold.durationMs,
+                finished: true,
+              }),
             ),
           });
         } catch (error) {
