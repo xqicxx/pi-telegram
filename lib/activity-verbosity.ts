@@ -315,6 +315,9 @@ export interface TelegramThinkingCardState {
   tools?: number;
   durationMs?: number;
   finished?: boolean;
+  /** When set, the card carries an in-bubble 收起 button for that message. */
+  foldMessageId?: number;
+  foldHighlighted?: boolean;
 }
 
 const formatThinkingChars = (chars: number): string =>
@@ -358,9 +361,19 @@ export function renderTelegramThinkingRichBlocks(
     type: "details",
     // Size lives on the headline only — repeating it here read as a duplicate.
     summary: "展开全文",
-    // Monospace box: raw reasoning is not prose, and the code block keeps its
-    // markers, indentation, and line breaks from turning into a text wall.
-    blocks: [{ type: "pre", text }],
+    blocks: [
+      // Monospace box: raw reasoning is not prose, and the code block keeps its
+      // markers, indentation, and line breaks from turning into a text wall.
+      { type: "pre", text },
+      ...(state.foldMessageId === undefined
+        ? []
+        : [
+            thinkingFoldButtonBlock(
+              state.foldMessageId,
+              state.foldHighlighted,
+            ),
+          ]),
+    ],
   });
   return blocks;
 }
@@ -387,6 +400,28 @@ export function thinkingFoldKeyboard(
           callback_data: `${TELEGRAM_THINKING_FOLD_CALLBACK_PREFIX}${messageId}`,
         },
       ],
+    ],
+  };
+}
+
+/**
+ * In-bubble closer. The rich `buttons` block sizes to its label, so the label is
+ * padded with ideographic spaces to reach across the bubble — the only way to
+ * get an inside-the-bubble control that reads as full width. `alternate` shifts
+ * the padding by one cell so a repeat tap is a changed payload.
+ */
+function thinkingFoldButtonBlock(
+  messageId: number,
+  alternate = false,
+): TelegramInputRichBlock {
+  return {
+    type: "buttons",
+    align: "center",
+    buttons: [
+      {
+        text: `收起${"　".repeat(alternate ? 9 : 8)}`,
+        callback_data: `${TELEGRAM_THINKING_FOLD_CALLBACK_PREFIX}${messageId}`,
+      },
     ],
   };
 }
@@ -624,7 +659,10 @@ export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
       publishedText = text;
       message = buildTelegramThinkingRichMessage(
         text,
-        renderTelegramThinkingRichBlocks(text, { chars: reasoningChars }),
+        renderTelegramThinkingRichBlocks(text, {
+          chars: reasoningChars,
+          foldMessageId: reasoningMessage?.messageId,
+        }),
       );
       if (text.length <= TELEGRAM_REASONING_MESSAGE_MAX_CHARS) break;
       retained = retained.slice(
@@ -639,8 +677,6 @@ export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
           chat_id: target.chatId,
           message_id: reasoningMessage.messageId,
           rich_message: message,
-          // The reader can close the card as soon as the button exists.
-          reply_markup: thinkingFoldKeyboard(reasoningMessage.messageId),
         });
       } else {
         const sent = await deps.sendRichMessage({
@@ -705,9 +741,10 @@ export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
           tools: entry.tools,
           durationMs: entry.durationMs,
           finished: true,
+          foldMessageId: entry.messageId,
+          foldHighlighted: highlighted,
         }),
       ),
-      reply_markup: thinkingFoldKeyboard(entry.messageId, highlighted),
     });
   };
 
