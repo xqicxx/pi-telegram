@@ -8,6 +8,7 @@ import test from "node:test";
 import {
   createTelegramActivityVerbosityBinding,
   createTelegramActivityVerbosityRuntime,
+  clipTelegramThinkingBody,
   renderTelegramThinkingRichBlocks,
   renderTelegramToolActivityHtml,
   requestTelegramThinkingFold,
@@ -15,6 +16,7 @@ import {
   TELEGRAM_ACTIVITY_MESSAGE_MAX_TOOLS,
   TELEGRAM_REASONING_BUFFER_MAX_CHARS,
   TELEGRAM_THINKING_PREVIEW_MAX_CHARS,
+  TELEGRAM_THINKING_FULL_CALLBACK_PREFIX,
   TELEGRAM_TOOL_UPDATE_MAX_ENTRIES,
   thinkingActivityPreview,
 } from "../lib/activity-verbosity.ts";
@@ -625,6 +627,16 @@ test("reasoning uses a persistent collapsed disclosure message", async () => {
             },
           ],
         },
+        {
+          type: "buttons",
+          align: "center",
+          buttons: [
+            {
+              text: `全文 .txt ${"─".repeat(20)}`,
+              callback_data: "think:full:101",
+            },
+          ],
+        },
       ],
     },
   ]);
@@ -1180,4 +1192,27 @@ test("reset drops accepted events that have not started processing", async () =>
   assert.match(JSON.stringify(richSends[0]), /new session/);
   assert.doesNotMatch(JSON.stringify(richSends[0]), /must not send/);
   releaseReasoning();
+});
+
+test("Thinking card bounds the expanded body and offers the full text", () => {
+  const long = "思".repeat(3_000);
+  const clipped = clipTelegramThinkingBody(long);
+  assert.ok(clipped.length < long.length, "long bodies are clipped");
+  assert.match(clipped, /还有 \d+ 字/);
+  assert.equal(clipTelegramThinkingBody("短"), "短");
+
+  const blocks = renderTelegramThinkingRichBlocks(long, { foldMessageId: 42 });
+  const details = blocks.find((block) => block.type === "details") as
+    | { type: "details"; blocks: Array<Record<string, unknown>> }
+    | undefined;
+  assert.ok(details, "the card keeps its details block");
+  const pre = details!.blocks.find((block) => block.type === "pre");
+  assert.equal(pre?.text, clipped, "the expanded body ships clipped");
+
+  const json = JSON.stringify(blocks);
+  assert.ok(
+    json.includes(`${TELEGRAM_THINKING_FULL_CALLBACK_PREFIX}42`),
+    "full-text button wired",
+  );
+  assert.ok(json.includes("收起"), "fold control unchanged");
 });

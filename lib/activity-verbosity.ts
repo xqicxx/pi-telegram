@@ -31,6 +31,12 @@ export const TELEGRAM_REASONING_BUFFER_MAX_CHARS = 16_000;
  * reasoning instead of a 3900 char tail.
  */
 const TELEGRAM_REASONING_MESSAGE_MAX_CHARS = 16_000;
+/**
+ * Expanded body cap. A rich message taller than the client viewport gets folded
+ * behind the client's own "show more", which hides the fold button with it, so
+ * the card ships a bounded body and offers the rest as a document instead.
+ */
+const TELEGRAM_THINKING_EXPANDED_MAX_CHARS = 1_200;
 export const TELEGRAM_REASONING_MIN_INTERVAL_MS = 1_200;
 export const TELEGRAM_TOOL_UPDATE_MAX_ENTRIES = 4;
 
@@ -364,14 +370,12 @@ export function renderTelegramThinkingRichBlocks(
     blocks: [
       // Monospace box: raw reasoning is not prose, and the code block keeps its
       // markers, indentation, and line breaks from turning into a text wall.
-      { type: "pre", text },
+      { type: "pre", text: clipTelegramThinkingBody(text) },
       ...(state.foldMessageId === undefined
         ? []
         : [
-            thinkingFoldButtonBlock(
-              state.foldMessageId,
-              state.foldHighlighted,
-            ),
+            thinkingFoldButtonBlock(state.foldMessageId, state.foldHighlighted),
+            thinkingFullButtonBlock(state.foldMessageId),
           ]),
     ],
   });
@@ -379,6 +383,7 @@ export function renderTelegramThinkingRichBlocks(
 }
 
 export const TELEGRAM_THINKING_FOLD_CALLBACK_PREFIX = "think:fold:";
+export const TELEGRAM_THINKING_FULL_CALLBACK_PREFIX = "think:full:";
 
 /**
  * Full-width closer row for a thinking card. A rich-message `buttons` block
@@ -411,6 +416,20 @@ export function thinkingFoldKeyboard(
  * the padding by one cell so a repeat tap is a changed payload.
  */
 const TELEGRAM_THINKING_FOLD_RULE = "─".repeat(20);
+
+/** Companion control: ship the unbounded reasoning as a .txt document. */
+function thinkingFullButtonBlock(messageId: number): TelegramInputRichBlock {
+  return {
+    type: "buttons",
+    align: "center",
+    buttons: [
+      {
+        text: `全文 .txt ${TELEGRAM_THINKING_FOLD_RULE}`,
+        callback_data: `${TELEGRAM_THINKING_FULL_CALLBACK_PREFIX}${messageId}`,
+      },
+    ],
+  };
+}
 
 function thinkingFoldButtonBlock(
   messageId: number,
@@ -464,6 +483,55 @@ function rememberThinkingCard(fold: TelegramThinkingCardFold): void {
     if (oldest.done) break;
     thinkingCards.delete(oldest.value);
   }
+}
+
+/** A live runtime answers with the unbounded text for one of its cards. */
+type ThinkingFullTextRequest = (
+  chatId: number,
+  messageId: number,
+) => Promise<string | undefined>;
+const thinkingFullTextRequests: ThinkingFullTextRequest[] = [];
+
+/** `requestTelegramThinkingFullText` returns the first runtime that owns it. */
+export function registerTelegramThinkingFullTextRequest(
+  handler: ThinkingFullTextRequest,
+): () => void {
+  thinkingFullTextRequests.push(handler);
+  return () => {
+    const index = thinkingFullTextRequests.indexOf(handler);
+    if (index >= 0) thinkingFullTextRequests.splice(index, 1);
+  };
+}
+
+/** Full text for a card; undefined once no live runtime still caches it. */
+export async function requestTelegramThinkingFullText(
+  chatId: number,
+  messageId: number,
+): Promise<string | undefined> {
+  // Newest runtime first, mirroring the fold request: the card belongs to
+  // whichever runtime cached it last.
+  for (
+    let index = thinkingFullTextRequests.length - 1;
+    index >= 0;
+    index -= 1
+  ) {
+    const handler = thinkingFullTextRequests[index];
+    if (!handler) continue;
+    try {
+      const text = await handler(chatId, messageId);
+      if (text) return text;
+    } catch {
+      // Another runtime may own the card; keep offering the request down.
+    }
+  }
+  return undefined;
+}
+
+/** Bounded expanded body: the tail lives in the `.txt` document. */
+export function clipTelegramThinkingBody(text: string): string {
+  if (text.length <= TELEGRAM_THINKING_EXPANDED_MAX_CHARS) return text;
+  const omitted = text.length - TELEGRAM_THINKING_EXPANDED_MAX_CHARS;
+  return `${text.slice(0, TELEGRAM_THINKING_EXPANDED_MAX_CHARS)}\n…\n（还有 ${omitted} 字，点「全文 .txt」）`;
 }
 
 export function registerTelegramThinkingFoldRequest(
@@ -784,6 +852,13 @@ export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
   );
 
   /** Take the newest card awaiting a fold, or one specific card by id. */
+  const unregisterThinkingFullTextRequest =
+    registerTelegramThinkingFullTextRequest(async (chatId, messageId) => {
+      const entry = thinkingCards.get(messageId);
+      if (!entry || entry.target.chatId !== chatId) return undefined;
+      return entry.text;
+    });
+
   const takeReasoningFold = (
     messageId?: number,
   ): TelegramThinkingCardFold | undefined => {
@@ -1078,6 +1153,7 @@ export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
       active = false;
       generation += 1;
       unregisterThinkingFoldRequest();
+      unregisterThinkingFullTextRequest();
       clearActivity();
       tail = Promise.resolve();
     },

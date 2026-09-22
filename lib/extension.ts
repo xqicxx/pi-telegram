@@ -972,6 +972,10 @@ export default function (pi: Pi.ExtensionAPI) {
   const inboundRouteRuntime = Routing.createTelegramInboundRouteRuntime({
     configStore,
     callApi: callTelegramApi,
+    sendDocumentText: Outbound.sendTelegramTextDocument.bind(
+      undefined,
+      callMultipart,
+    ),
     getCurrentInstanceId() {
       return telegramInstanceId;
     },

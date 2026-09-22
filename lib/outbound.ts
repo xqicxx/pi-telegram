@@ -5,8 +5,41 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { mkdir } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+
+/**
+ * Ship an in-memory text as a Telegram document. Used by the thinking card's
+ * `.txt` control, whose body is too tall to live in a rich message.
+ */
+export async function sendTelegramTextDocument(
+  callMultipart: (
+    method: string,
+    fields: Record<string, string>,
+    fileField: string,
+    filePath: string,
+    fileName: string,
+  ) => Promise<unknown>,
+  chatId: number,
+  fileName: string,
+  text: string,
+): Promise<unknown> {
+  // ponytail: the bridge's own temp dir, so its age-based sweeper reclaims the
+  // file even if this turn dies mid-upload; permissions match the downloads.
+  const filePath = join(resolveTelegramTempDir(), fileName);
+  await writeFile(filePath, text, { encoding: "utf8", mode: 0o600 });
+  try {
+    return await callMultipart(
+      "sendDocument",
+      { chat_id: String(chatId) },
+      "document",
+      filePath,
+      fileName,
+    );
+  } finally {
+    await rm(filePath, { force: true });
+  }
+}
 
 import type { TelegramAssistantSegmentEvent } from "./activity.ts";
 import { resolveTelegramTempDir } from "./paths.ts";

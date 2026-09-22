@@ -547,6 +547,12 @@ export interface TelegramInboundRouteRuntimeDeps<
     method: string,
     body: Record<string, unknown>,
   ) => Promise<TResponse>;
+  /** Ship the unbounded thinking body when the card's `.txt` button is tapped. */
+  sendDocumentText?: (
+    chatId: number,
+    fileName: string,
+    text: string,
+  ) => Promise<unknown>;
   getCurrentInstanceId?: () => string | undefined;
   getAdmissionScope?: () => string | undefined;
   getAdmissionJournalBinding?: () => string | undefined;
@@ -2188,6 +2194,39 @@ export function createTelegramInboundRouteRuntime<
       void Activity.requestTelegramThinkingFold(chatId, messageId).catch(
         () => {},
       );
+      return;
+    }
+    if (
+      typeof query.data === "string" &&
+      query.data.startsWith(Activity.TELEGRAM_THINKING_FULL_CALLBACK_PREFIX)
+    ) {
+      const chatId = query.message?.chat?.id;
+      const messageId = Number(
+        query.data.slice(
+          Activity.TELEGRAM_THINKING_FULL_CALLBACK_PREFIX.length,
+        ),
+      );
+      // ponytail: the card text lives in the routing process, so a follower
+      // that does not own it falls back to the same expired toast.
+      const text =
+        typeof chatId === "number" && Number.isInteger(messageId)
+          ? await Activity.requestTelegramThinkingFullText(
+              chatId,
+              messageId,
+            )
+          : undefined;
+      if (typeof chatId !== "number" || !text || !deps.sendDocumentText) {
+        await deps.answerCallbackQuery(query.id, "卡片已过期");
+        return;
+      }
+      await deps.answerCallbackQuery(query.id, "发送全文…");
+      try {
+        await deps.sendDocumentText(chatId, `thinking-${messageId}.txt`, text);
+      } catch (error) {
+        deps.recordRuntimeEvent?.("telegram-callback", error, {
+          command: "thinking-full",
+        });
+      }
       return;
     }
     const handledByNew = await Commands.handleTelegramNewConfirmationCallback(
