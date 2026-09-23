@@ -84,7 +84,7 @@ For capability-specific composition guidance, read only the applicable reference
 
 1. Identify intent, controlled object, owner, and truth mode.
 2. Inspect only the evidence needed for a truthful projection.
-3. Admit only high-leverage actions and classify their impact.
+3. Admit only high-leverage actions and classify their impact; when more than six survive, settle membership and order through the[Jev selection layer](./references/jev-selection.md).
 4. Arrange semantic rows, then serialize through the transport owner.
 5. Treat the click as a new request, validate authority, act, and refresh reality.
 
