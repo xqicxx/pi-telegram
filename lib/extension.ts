@@ -595,6 +595,8 @@ export default function (pi: Pi.ExtensionAPI) {
     answerCallbackQuery,
     answerGuestQuery,
     deleteMessage: deleteTelegramMessage,
+    pinMessage: pinActivityMessage,
+    unpinMessage: unpinActivityMessage,
     prepareTempDir,
   } = telegramApiRuntime;
 
@@ -769,6 +771,8 @@ export default function (pi: Pi.ExtensionAPI) {
       sendMessage,
       sendRichMessage,
       editMessageText: editTelegramMessageText,
+      pinMessage: pinActivityMessage,
+      unpinMessage: unpinActivityMessage,
     },
   });
   const {

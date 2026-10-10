@@ -613,6 +613,9 @@ export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
   captureAuthority: () => TAuthority;
   isAuthorityActive: (authority: TAuthority) => boolean;
   sendMessage: (body: TelegramSendMessageBody) => Promise<TelegramSentMessage>;
+  /** 活动状态消息钉在聊天顶部；不提供就完全不 pin。 */
+  pinMessage?: (chatId: number, messageId: number) => Promise<void>;
+  unpinMessage?: (chatId: number, messageId: number) => Promise<void>;
   sendRichMessage: (
     body: TelegramSendRichMessageBody,
   ) => Promise<TelegramSentMessage>;
@@ -655,6 +658,37 @@ export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
   let reasoningBlocked = false;
   let lastReasoningPublishMs = 0;
   let toolMessage: ToolMessage | undefined;
+  let pinnedActivity: { chatId: number; messageId: number } | undefined;
+
+  const releaseActivityPin = async () => {
+    const pinned = pinnedActivity;
+    pinnedActivity = undefined;
+    if (!pinned || !deps.unpinMessage) return;
+    try {
+      await deps.unpinMessage(pinned.chatId, pinned.messageId);
+    } catch {
+      // ignore
+    }
+  };
+
+  // ponytail: 同一时刻只钉一条；新活动消息出现 = 旧的"不再是最新的那条" → 先取消再钉新的
+  const pinActivityMessage = async (chatId: number, messageId: number) => {
+    if (!deps.pinMessage || !deps.unpinMessage) return;
+    if (
+      pinnedActivity &&
+      (pinnedActivity.chatId !== chatId ||
+        pinnedActivity.messageId !== messageId)
+    ) {
+      await releaseActivityPin();
+    }
+    if (pinnedActivity) return;
+    pinnedActivity = { chatId, messageId };
+    try {
+      await deps.pinMessage(chatId, messageId);
+    } catch {
+      pinnedActivity = undefined;
+    }
+  };
   const tools = new Map<string, ToolActivity>();
   const toolOrder: string[] = [];
 
@@ -766,6 +800,7 @@ export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
           messageId: sent.message_id,
           target: { ...target },
         };
+        await pinActivityMessage(target.chatId, sent.message_id);
       }
       if (!isCurrent(acceptedGeneration, admittedAuthority)) return;
       reasoningMessageFrames += 1;
@@ -956,6 +991,7 @@ export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
         target: { ...target },
         format,
       };
+      await pinActivityMessage(target.chatId, sent.message_id);
     } catch (error) {
       if (!isCurrent(acceptedGeneration, admittedAuthority)) return;
       closeToolBatch();
@@ -1146,12 +1182,14 @@ export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
     },
     reset() {
       generation += 1;
+      void releaseActivityPin();
       clearActivity();
       tail = Promise.resolve();
     },
     stop() {
       active = false;
       generation += 1;
+      void releaseActivityPin();
       unregisterThinkingFoldRequest();
       unregisterThinkingFullTextRequest();
       clearActivity();

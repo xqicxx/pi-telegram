@@ -552,6 +552,8 @@ export function createTelegramApiTargetActivityRuntime(): TelegramApiTargetActiv
   const pendingChats = new Map<number, number>();
   const messageScopedMethods = new Set([
     "deleteMessage",
+    "pinChatMessage",
+    "unpinChatMessage",
     "editMessageCaption",
     "editMessageReplyMarkup",
     "editMessageText",
@@ -912,6 +914,9 @@ export interface TelegramBridgeApiRuntime {
     content: TelegramEditGuestInlineMessageContent,
   ) => Promise<void>;
   deleteMessage: (chatId: number, messageId: number) => Promise<void>;
+  /** 可选：钉住 / 取消钉住一条消息（活动状态消息用）。 */
+  pinMessage?: (chatId: number, messageId: number) => Promise<void>;
+  unpinMessage?: (chatId: number, messageId: number) => Promise<void>;
   prepareTempDir: () => Promise<number>;
 }
 
@@ -1031,10 +1036,12 @@ const TELEGRAM_RETRY_SAFE_METHODS = new Set([
   "getFile",
   "getMe",
   "getUpdates",
+  "pinChatMessage",
   "sendChatAction",
   "sendMessageDraft",
   "sendRichMessageDraft",
   "setMyCommands",
+  "unpinChatMessage",
 ]);
 
 export function isTelegramApiMethodRetrySafe(method: string): boolean {
@@ -1845,6 +1852,39 @@ export async function answerTelegramCallbackQuery(
   }
 }
 
+// 活动状态消息在干活时被钉在聊天顶部；活干完（消息不再是最新的那条）就取消钉。
+// 失败一律吞掉：钉不住不是致命错误，绝不能因此打断活动消息的发送。
+export async function pinTelegramMessage(
+  botToken: string | undefined,
+  chatId: number,
+  messageId: number,
+): Promise<void> {
+  try {
+    await callTelegram<boolean>(botToken, "pinChatMessage", {
+      chat_id: chatId,
+      message_id: messageId,
+      disable_notification: true,
+    });
+  } catch {
+    // ignore
+  }
+}
+
+export async function unpinTelegramMessage(
+  botToken: string | undefined,
+  chatId: number,
+  messageId: number,
+): Promise<void> {
+  try {
+    await callTelegram<boolean>(botToken, "unpinChatMessage", {
+      chat_id: chatId,
+      message_id: messageId,
+    });
+  } catch {
+    // ignore
+  }
+}
+
 export async function deleteTelegramMessage(
   botToken: string | undefined,
   chatId: number,
@@ -2308,6 +2348,18 @@ export function createTelegramBridgeApiRuntime(
       prepareTelegramTempDir(deps.tempDir, deps.tempFileMaxAgeMs),
     deleteMessage: (chatId, messageId) =>
       callRecorded<boolean>("deleteMessage", {
+        chat_id: chatId,
+        message_id: messageId,
+      }).then(() => {}),
+    // 活动状态消息在干活时钉住、结束或被取代时取消；失败吞掉，不许打断活动消息
+    pinMessage: (chatId, messageId) =>
+      callRecorded<boolean>("pinChatMessage", {
+        chat_id: chatId,
+        message_id: messageId,
+        disable_notification: true,
+      }).then(() => {}),
+    unpinMessage: (chatId, messageId) =>
+      callRecorded<boolean>("unpinChatMessage", {
         chat_id: chatId,
         message_id: messageId,
       }).then(() => {}),

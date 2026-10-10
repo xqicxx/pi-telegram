@@ -22,6 +22,14 @@ Preserve the same ordering and pagination in a numbered fallback. Show a plain d
 
 Keep exact workflow, Recipe, Run, artifact, or task identity visible. Inspect, pause, continue, redirect, retry, or stop only through the owning runtime contract. Never simulate lifecycle state, bypass Control semantics, or treat a button as execution authority.
 
+## Native Windows
+
+Use the `cua-driver` capability owner for a real, on-space macOS window. Its verdict is the truth, not the exit status: `refused` means it refused to act, `matched` means it proved the target, `unverifiable` means it acted without proof—never render the last two as the same outcome, and never claim success from one. Address state with both `window_id` and `pid`. Windows that are off the current space are refused outright, so read `background_input.routes` before promising an action. Background work keeps the user's focus untouched; an activation that cannot be verified reports `activated: false` rather than pretending.
+
+## Browser Pages
+
+Use `browser-harness` and CDP for page-level work: DOM, navigation, evaluation, and the debugging instance whose windows stay off-space and therefore stay unreachable to `cua-driver`. Do not route page work to the native-window owner, and do not route native-window work to CDP.
+
 ## Decisions And Design
 
 Controls may represent conversational alternatives without live inspection. State the decision and material trade-offs in visible text. Each prompt records the selected intent; it does not silently execute downstream consequences.
