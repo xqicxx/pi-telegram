@@ -1,0 +1,121 @@
+{
+  "name": "@llblab/pi-telegram",
+  "version": "0.54.3",
+  "private": false,
+  "publishConfig": {
+    "access": "public"
+  },
+  "description": "Telegram runtime adapter for Pi",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "telegram",
+    "bot",
+    "extension"
+  ],
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/llblab/pi-telegram.git"
+  },
+  "homepage": "https://github.com/llblab/pi-telegram",
+  "bugs": {
+    "url": "https://github.com/llblab/pi-telegram/issues"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types --import ./tests/fixtures/canonical-tmpdir.ts --test --test-concurrency=4 --test-reporter=dot tests/*.test.ts",
+    "test:verbose": "node --experimental-strip-types --import ./tests/fixtures/canonical-tmpdir.ts --test --test-reporter=spec tests/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "build": "node scripts/build-dist.mjs",
+    "build:check": "node scripts/build-dist.mjs --check",
+    "prepack": "npm run build",
+    "check": "node -e \"await import('./dist/pi-telegram/index.js'); console.log('pi-telegram: extension import ok')\"",
+    "audit": "npm audit --omit=peer --registry=https://registry.npmjs.org",
+    "audit:host": "npm audit",
+    "pack:check": "npm pack --dry-run",
+    "validate": "npm run build:check && npm run typecheck && npm test && npm run audit && npm run check && npm run pack:check"
+  },
+  "files": [
+    "index.ts",
+    "api/",
+    "lib/",
+    "dist/",
+    "README.md",
+    "AGENTS.md",
+    "BACKLOG.md",
+    "CHANGELOG.md",
+    "docs/",
+    "scripts/",
+    "skills/",
+    "screenshot.png"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./inbound": {
+      "types": "./dist/api/inbound.d.ts",
+      "default": "./dist/api/inbound.js"
+    },
+    "./outbound": {
+      "types": "./dist/api/outbound.d.ts",
+      "default": "./dist/api/outbound.js"
+    },
+    "./delivery": {
+      "types": "./dist/api/delivery.d.ts",
+      "default": "./dist/api/delivery.js"
+    },
+    "./activity": {
+      "types": "./dist/api/activity.d.ts",
+      "default": "./dist/api/activity.js"
+    },
+    "./updates": {
+      "types": "./dist/api/updates.d.ts",
+      "default": "./dist/api/updates.js"
+    },
+    "./commands": {
+      "types": "./dist/api/commands.d.ts",
+      "default": "./dist/api/commands.js"
+    },
+    "./sections": {
+      "types": "./dist/api/sections.d.ts",
+      "default": "./dist/api/sections.js"
+    },
+    "./status": {
+      "types": "./dist/api/status.d.ts",
+      "default": "./dist/api/status.js"
+    },
+    "./voice": {
+      "types": "./dist/api/voice.d.ts",
+      "default": "./dist/api/voice.js"
+    },
+    "./keyboard": {
+      "types": "./dist/api/keyboard.d.ts",
+      "default": "./dist/api/keyboard.js"
+    }
+  },
+  "pi": {
+    "extensions": [
+      "./dist/pi-telegram/index.js"
+    ],
+    "skills": [
+      "./dist/skills"
+    ],
+    "image": "https://raw.githubusercontent.com/llblab/pi-telegram/main/screenshot.png"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-agent-core": ">=1.0.0",
+    "@earendil-works/pi-ai": ">=1.0.0",
+    "@earendil-works/pi-coding-agent": ">=1.0.0",
+    "@sinclair/typebox": "*"
+  },
+  "devDependencies": {
+    "@types/node": "latest",
+    "typescript": "latest"
+  }
+}

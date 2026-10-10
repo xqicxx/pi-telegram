@@ -7,6 +7,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { resolveTelegramTempDir } from "./paths.ts";
 
 /**
  * Ship an in-memory text as a Telegram document. Used by the thinking card's
@@ -42,17 +43,6 @@ export async function sendTelegramTextDocument(
 }
 
 import type { TelegramAssistantSegmentEvent } from "./activity.ts";
-import { resolveTelegramTempDir } from "./paths.ts";
-import * as Replies from "./replies.ts";
-import type { TelegramPreparedPreviewDelivery } from "./preview.ts";
-import { isTelegramApiCommitUnknownError } from "./telegram-api.ts";
-import type {
-  TelegramEditMessageTextBody,
-  TelegramSendMessageBody,
-  TelegramSendRichMessageBody,
-  TelegramSentMessage,
-} from "./telegram-api.ts";
-
 import {
   planTelegramButtonReply,
   type TelegramButtonActionStore,
@@ -65,15 +55,32 @@ import {
   type TelegramVoiceReplyItem,
 } from "./outbound-markup.ts";
 import { createTelegramVoiceReplySender as createTelegramVoiceReplySenderWithPorts } from "./outbound-voice.ts";
+import { resolveTelegramAttachmentsDir } from "./paths.ts";
+import type { TelegramPreparedPreviewDelivery } from "./preview.ts";
+import * as Replies from "./replies.ts";
 import type { TelegramTarget } from "./target.ts";
+import type {
+  TelegramEditMessageTextBody,
+  TelegramSendMessageBody,
+  TelegramSendRichMessageBody,
+  TelegramSentMessage,
+} from "./telegram-api.ts";
+import {
+  assertTelegramApiCallAuthority,
+  isTelegramApiCommitUnknownError,
+} from "./telegram-api.ts";
 
 const OUTBOUND_HANDLER_REGISTRY_KEY = "__piTelegramOutboundHandlers__";
 const VOICE_EVENT_RECORDER_KEY = "__piTelegramVoiceEventRecorder__";
 
 import {
   buildCommandTemplateInvocation,
-  expandCommandTemplateConfigs,
-  substituteCommandTemplateToken,
+  createCommandTemplateRecovery,
+  getCommandTemplateCompositionSteps,
+  shouldRunCommandTemplateConfig,
+  getCommandTemplateConfiguredTimeout,
+  getCommandTemplateStepTimeout,
+  resolveCommandTemplateNumericField,
   type CommandTemplateObjectConfig,
 } from "./command-templates.ts";
 const DEFAULT_VOICE_TIMEOUT_MS = 120_000;
@@ -120,22 +127,13 @@ export interface TelegramOutboundHandlerConfig extends CommandTemplateObjectConf
   timeout?: number | string;
 }
 
-export {
-  normalizeMarkdownAfterVoiceExtraction,
-  planTelegramVoiceReply,
-  stripTelegramCommentMarkupForDelivery,
-  stripTelegramCommentMarkupForPreview,
-  stripTelegramVoiceMarkupForPreview,
-  type TelegramVoiceReplyItem,
-  type TelegramVoiceReplyPlan,
-} from "./outbound-markup.ts";
-
 export interface TelegramVoiceExecOptions {
   cwd?: string;
   timeout?: number;
   signal?: AbortSignal;
   stdin?: string;
   retry?: number;
+  recover?: () => Promise<void>;
 }
 
 export interface TelegramVoiceExecResult {
@@ -235,7 +233,7 @@ export function registerTelegramOutboundHandler(
   };
 }
 
-export function getTelegramOutboundProgrammaticHandlers(
+function getTelegramOutboundProgrammaticHandlers(
   kind: string,
 ): TelegramOutboundProgrammaticHandler[] {
   const registry = getOrCreateOutboundHandlerRegistry();
@@ -249,13 +247,19 @@ export interface TelegramOutboundTextReplyRuntimeDeps<TReplyMarkup = unknown> {
     chatId: number,
     replyToMessageId: number | undefined,
     text: string,
-    options?: { parseMode?: "HTML"; target?: TelegramTarget },
+    options?: { parseMode?: "HTML"; target?: TelegramTarget } & Pick<
+      Replies.TelegramReplyTargetOptions,
+      "assertAuthority"
+    >,
   ) => Promise<number | undefined>;
   sendMarkdownReply: (
     chatId: number,
     replyToMessageId: number | undefined,
     markdown: string,
-    options?: { replyMarkup?: TReplyMarkup; target?: TelegramTarget },
+    options?: { replyMarkup?: TReplyMarkup; target?: TelegramTarget } & Pick<
+      Replies.TelegramReplyTargetOptions,
+      "assertAuthority"
+    >,
   ) => Promise<number | undefined>;
   cwd?: string;
   recordRuntimeEvent?: TelegramVoiceReplySenderDeps["recordRuntimeEvent"];
@@ -284,60 +288,21 @@ export interface TelegramOutboundTextPreviewRuntimeDeps<
   execCommand: TelegramVoiceReplySenderDeps["execCommand"];
   getHandlers?: () => TelegramOutboundHandlerConfig[] | undefined;
   finalizeMarkdownPreview: TelegramPreparedPreviewDelivery<TReplyMarkup>["finalizeMarkdownPreview"];
-  preparePreviewDelivery?: (isDeliveryActive: () => boolean) => TelegramPreparedPreviewDelivery<TReplyMarkup>;
+  preparePreviewDelivery?: (
+    isDeliveryActive: () => boolean,
+  ) => TelegramPreparedPreviewDelivery<TReplyMarkup>;
   cwd?: string;
   recordRuntimeEvent?: TelegramVoiceReplySenderDeps["recordRuntimeEvent"];
 }
 
 // --- Voice Reply Timeout Helpers ---
 
-function resolveOutboundNumericControlField(
-  value: number | string | undefined,
-  values: Record<string, unknown>,
-  label: string,
-): number | undefined {
-  if (value === undefined) return undefined;
-  const resolved =
-    typeof value === "string"
-      ? substituteCommandTemplateToken(value, values, label)
-      : value;
-  if (resolved === "") return undefined;
-  const numeric = Number(resolved);
-  if (!Number.isFinite(numeric) || numeric < 0)
-    throw new Error(`Command template ${label} must be a non-negative number.`);
-  return numeric;
-}
-
-function getVoiceReplyConfiguredTimeout(
-  config: TelegramOutboundCommandTemplateConfig | undefined,
-): number | undefined {
-  const timeout = typeof config === "string" ? undefined : config?.timeout;
-  return resolveOutboundNumericControlField(timeout, {}, "timeout");
-}
-
 function getVoiceReplyTimeout(
   config: TelegramOutboundCommandTemplateConfig | undefined,
 ): number {
-  return getVoiceReplyConfiguredTimeout(config) ?? DEFAULT_VOICE_TIMEOUT_MS;
-}
-
-function getRemainingVoiceReplyTimeout(
-  timeout: number,
-  startedAt: number,
-): number {
-  return Math.max(1, timeout - (Date.now() - startedAt));
-}
-
-function getVoiceReplyCompositionStepTimeout(
-  handlerTimeout: number,
-  step: TelegramOutboundCommandTemplateConfig,
-  startedAt: number,
-): number {
-  const remaining = getRemainingVoiceReplyTimeout(handlerTimeout, startedAt);
-  const stepTimeout = getVoiceReplyConfiguredTimeout(step);
-  return stepTimeout === undefined
-    ? remaining
-    : Math.min(stepTimeout, remaining);
+  return (
+    getCommandTemplateConfiguredTimeout(config) ?? DEFAULT_VOICE_TIMEOUT_MS
+  );
 }
 
 function formatVoiceReplyExecutionFailure(
@@ -350,6 +315,12 @@ function formatVoiceReplyExecutionFailure(
   if (result.stderr.trim()) parts.push(`stderr:\n${result.stderr.trimEnd()}`);
   if (result.stdout.trim()) parts.push(`stdout:\n${result.stdout.trimEnd()}`);
   return parts.join("\n\n");
+}
+
+function withCommandTemplateRecovery(
+  recover: (() => Promise<void>) | undefined,
+): Pick<TelegramVoiceExecOptions, "recover"> {
+  return recover ? { recover } : {};
 }
 
 async function runVoiceReplyCommand(
@@ -383,10 +354,17 @@ async function runVoiceReplyCommand(
       timeout: options.timeout,
       ...(typeof config === "object" && config.retry !== undefined
         ? {
-            retry: resolveOutboundNumericControlField(
+            retry: resolveCommandTemplateNumericField(
               config.retry,
               {},
               "retry",
+            ),
+            ...withCommandTemplateRecovery(
+              createCommandTemplateRecovery(config, values, {
+                cwd: options.cwd,
+                timeout: options.timeout,
+                execCommand: options.execCommand,
+              }),
             ),
           }
         : {}),
@@ -435,17 +413,6 @@ export function findTelegramOutboundHandlers(
   );
 }
 
-function getTelegramVoiceHandlerCompositionSteps(
-  handler: TelegramOutboundHandlerConfig,
-): TelegramOutboundCommandTemplateConfig[] {
-  if (Array.isArray(handler.template)) {
-    return expandCommandTemplateConfigs(
-      handler,
-    ) as TelegramOutboundCommandTemplateConfig[];
-  }
-  return [];
-}
-
 function extractVoiceReplyPath(stdout: string): string {
   const path = stdout.trim().split(/\r?\n/).filter(Boolean).at(-1);
   if (!path) throw new Error("Voice generator did not print an output path");
@@ -484,7 +451,7 @@ function getVoiceReplyTemplateValues(
 }
 
 function getDefaultTelegramVoiceTempDir(): string {
-  return resolveTelegramTempDir();
+  return resolveTelegramAttachmentsDir();
 }
 
 async function generateTelegramVoiceReplyFileWithHandler(
@@ -498,7 +465,7 @@ async function generateTelegramVoiceReplyFileWithHandler(
     timeout: number;
     execCommand: TelegramVoiceReplySenderDeps["execCommand"];
   },
-): Promise<string> {
+): Promise<string | undefined> {
   await mkdir(options.tempDir, { recursive: true });
   const artifactId = randomUUID();
   const values = getVoiceReplyTemplateValues(text, {
@@ -507,11 +474,14 @@ async function generateTelegramVoiceReplyFileWithHandler(
     mp3Path: join(options.tempDir, `${artifactId}-voice.mp3`),
     oggPath: join(options.tempDir, `${artifactId}-voice.ogg`),
   });
-  const steps = getTelegramVoiceHandlerCompositionSteps(options.handler);
+  if (!shouldRunCommandTemplateConfig(options.handler, values))
+    return undefined;
+  const steps = getCommandTemplateCompositionSteps(options.handler);
   if (steps.length > 0) {
     const startedAt = Date.now();
     let stdout = text;
     for (const [index, step] of steps.entries()) {
+      if (!shouldRunCommandTemplateConfig(step, values)) continue;
       try {
         const result = await runVoiceReplyCommand(
           `Outbound voice template step ${index + 1}`,
@@ -519,10 +489,10 @@ async function generateTelegramVoiceReplyFileWithHandler(
           values,
           {
             cwd: options.cwd,
-            timeout: getVoiceReplyCompositionStepTimeout(
+            timeout: getCommandTemplateStepTimeout(
               options.timeout,
               step,
-              startedAt,
+              Date.now() - startedAt,
             ),
             execCommand: options.execCommand,
             stdin: stdout,
@@ -587,11 +557,13 @@ async function transformTelegramOutboundTextWithHandler(
   },
 ): Promise<string> {
   const values = getOutboundTextTemplateValues(text);
-  const steps = getTelegramVoiceHandlerCompositionSteps(options.handler);
+  if (!shouldRunCommandTemplateConfig(options.handler, values)) return text;
+  const steps = getCommandTemplateCompositionSteps(options.handler);
   if (steps.length > 0) {
     const startedAt = Date.now();
     let stdout = text;
     for (const [index, step] of steps.entries()) {
+      if (!shouldRunCommandTemplateConfig(step, values)) continue;
       try {
         const result = await runVoiceReplyCommand(
           `Outbound text template step ${index + 1}`,
@@ -599,10 +571,10 @@ async function transformTelegramOutboundTextWithHandler(
           values,
           {
             cwd: options.cwd,
-            timeout: getVoiceReplyCompositionStepTimeout(
+            timeout: getCommandTemplateStepTimeout(
               getVoiceReplyTimeout(options.handler),
               step,
-              startedAt,
+              Date.now() - startedAt,
             ),
             execCommand: options.execCommand,
             stdin: stdout,
@@ -631,7 +603,7 @@ async function transformTelegramOutboundTextWithHandler(
   return result.stdout.trim() || text;
 }
 
-export async function transformTelegramOutboundText(
+async function transformTelegramOutboundText(
   text: string,
   options: {
     handlers?: TelegramOutboundHandlerConfig[];
@@ -691,9 +663,7 @@ async function transformTelegramOutboundReplyMarkup<TReplyMarkup>(
   return { ...replyMarkup, inline_keyboard: translatedRows } as TReplyMarkup;
 }
 
-export async function transformTelegramOutboundTextReply<
-  TReplyMarkup = unknown,
->(
+async function transformTelegramOutboundTextReply<TReplyMarkup = unknown>(
   text: string,
   options: TelegramOutboundTextTransformOptions<TReplyMarkup>,
 ): Promise<TelegramOutboundTextTransformResult<TReplyMarkup>> {
@@ -720,37 +690,65 @@ export function createTelegramOutboundTextReplyRuntime<TReplyMarkup = unknown>(
   TelegramOutboundTextReplyRuntimeDeps<TReplyMarkup>,
   "sendTextReply" | "sendMarkdownReply"
 > {
+  const sendTextReply = deps.sendTextReply,
+    sendMarkdownReply = deps.sendMarkdownReply;
   return {
     sendTextReply: async (chatId, replyToMessageId, text, options) => {
+      const capturedOptions = options && {
+        ...options,
+        ...(options.target ? { target: { ...options.target } } : {}),
+      };
+      const assertAuthority = capturedOptions?.assertAuthority;
+      assertTelegramApiCallAuthority(assertAuthority, false);
       const transformed = await transformTelegramOutboundText(text, {
         handlers: deps.getHandlers?.(),
         cwd: deps.cwd,
         execCommand: deps.execCommand,
         recordRuntimeEvent: deps.recordRuntimeEvent,
       });
-      return deps.sendTextReply(chatId, replyToMessageId, transformed, options);
+      assertTelegramApiCallAuthority(assertAuthority, false);
+      const messageId = await sendTextReply(
+        chatId,
+        replyToMessageId,
+        transformed,
+        capturedOptions,
+      );
+      assertTelegramApiCallAuthority(assertAuthority, true);
+      return messageId;
     },
     sendMarkdownReply: async (chatId, replyToMessageId, markdown, options) => {
+      const capturedOptions = options && {
+        ...options,
+        ...(options.target ? { target: { ...options.target } } : {}),
+      };
+      const assertAuthority = capturedOptions?.assertAuthority;
+      assertTelegramApiCallAuthority(assertAuthority, false);
       const deliveryMarkdown = stripTelegramCommentMarkupForDelivery(markdown);
       if (!deliveryMarkdown) return undefined;
-      const transformed = await transformTelegramOutboundTextReply(deliveryMarkdown, {
-        handlers: deps.getHandlers?.(),
-        cwd: deps.cwd,
-        execCommand: deps.execCommand,
-        recordRuntimeEvent: deps.recordRuntimeEvent,
-        replyMarkup: options?.replyMarkup,
-      });
-      return deps.sendMarkdownReply(
+      const transformed = await transformTelegramOutboundTextReply(
+        deliveryMarkdown,
+        {
+          handlers: deps.getHandlers?.(),
+          cwd: deps.cwd,
+          execCommand: deps.execCommand,
+          recordRuntimeEvent: deps.recordRuntimeEvent,
+          replyMarkup: capturedOptions?.replyMarkup,
+        },
+      );
+      assertTelegramApiCallAuthority(assertAuthority, false);
+      const messageId = await sendMarkdownReply(
         chatId,
         replyToMessageId,
         transformed.text,
         {
-          ...options,
+          ...capturedOptions,
           ...(transformed.replyMarkup
             ? { replyMarkup: transformed.replyMarkup }
             : {}),
         },
       );
+      assertTelegramApiCallAuthority(assertAuthority, true);
+      return messageId;
     },
   };
 }
@@ -761,16 +759,15 @@ export function createTelegramOutboundTextPreviewRuntime<
   deps: TelegramOutboundTextPreviewRuntimeDeps<TReplyMarkup>,
 ): {
   finalizeMarkdownPreview: TelegramPreparedPreviewDelivery<TReplyMarkup>["finalizeMarkdownPreview"];
-  preparePreviewDelivery: (isDeliveryActive: () => boolean) => TelegramPreparedPreviewDelivery<TReplyMarkup> | undefined;
+  preparePreviewDelivery: (
+    isDeliveryActive: () => boolean,
+  ) => TelegramPreparedPreviewDelivery<TReplyMarkup> | undefined;
 } {
-  const wrap = (
-    finalize: TelegramPreparedPreviewDelivery<TReplyMarkup>["finalizeMarkdownPreview"],
-  ): TelegramPreparedPreviewDelivery<TReplyMarkup>["finalizeMarkdownPreview"] => async (
-      chatId,
-      markdown,
-      replyToMessageId,
-      options,
-    ) => {
+  const wrap =
+    (
+      finalize: TelegramPreparedPreviewDelivery<TReplyMarkup>["finalizeMarkdownPreview"],
+    ): TelegramPreparedPreviewDelivery<TReplyMarkup>["finalizeMarkdownPreview"] =>
+    async (chatId, markdown, replyToMessageId, options) => {
       const transformed = await transformTelegramOutboundTextReply(markdown, {
         handlers: deps.getHandlers?.(),
         cwd: deps.cwd,
@@ -778,23 +775,23 @@ export function createTelegramOutboundTextPreviewRuntime<
         recordRuntimeEvent: deps.recordRuntimeEvent,
         replyMarkup: options?.replyMarkup,
       });
-      return finalize(
-        chatId,
-        transformed.text,
-        replyToMessageId,
-        {
-          ...options,
-          ...(transformed.replyMarkup
-            ? { replyMarkup: transformed.replyMarkup }
-            : {}),
-        },
-      );
+      return finalize(chatId, transformed.text, replyToMessageId, {
+        ...options,
+        ...(transformed.replyMarkup
+          ? { replyMarkup: transformed.replyMarkup }
+          : {}),
+      });
     };
   return {
     finalizeMarkdownPreview: wrap(deps.finalizeMarkdownPreview),
     preparePreviewDelivery(isDeliveryActive) {
       const prepared = deps.preparePreviewDelivery?.(isDeliveryActive);
-      return prepared ? { ...prepared, finalizeMarkdownPreview: wrap(prepared.finalizeMarkdownPreview) } : undefined;
+      return prepared
+        ? {
+            ...prepared,
+            finalizeMarkdownPreview: wrap(prepared.finalizeMarkdownPreview),
+          }
+        : undefined;
     },
   };
 }
@@ -925,14 +922,21 @@ export function createTelegramOutboundReplyArtifactSender(
     options?: { replyToPrompt?: boolean; isDeliveryActive?: () => boolean },
   ): Promise<void> => {
     const isDeliveryActive = () =>
-      deps.isDeliveryActive?.() !== false && options?.isDeliveryActive?.() !== false;
-    const sendVoiceReply = createTelegramVoiceReplySender({ ...deps, isDeliveryActive });
+      deps.isDeliveryActive?.() !== false &&
+      options?.isDeliveryActive?.() !== false;
+    const sendVoiceReply = createTelegramVoiceReplySender({
+      ...deps,
+      isDeliveryActive,
+    });
     // Normalize voice replies: either use explicit voiceReplies array or fall back to voiceText
     const voiceReplies = plan.voiceReplies?.length
       ? plan.voiceReplies
       : plan.voiceText
         ? [{ text: plan.voiceText, lang: plan.lang, rate: plan.rate }]
         : [];
+    // A plan without voice content has nothing to deliver; absence of
+    // content is not a synthesis failure.
+    if (voiceReplies.length === 0) return;
 
     let anyDelivered = false;
 

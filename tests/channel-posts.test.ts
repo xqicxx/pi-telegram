@@ -4,7 +4,7 @@
  */
 
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, symlink, writeFile, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { promisify } from "node:util";
 import { join } from "node:path";
@@ -25,10 +25,13 @@ import {
   TelegramChannelPostValidationError,
 } from "../lib/channel-posts.ts";
 import type { ExtensionAPI } from "../lib/pi.ts";
+import { resolveTelegramServiceJournalStorage, resolveTelegramTempDir } from "../lib/paths.ts";
 
 const tokenSha256 = "a".repeat(64);
 const execFileAsync = promisify(execFile);
-const test = process.platform === "win32" ? nodeTest.skip : nodeTest;
+const test = nodeTest;
+// Creating symbolic links needs elevated rights on Windows, and its privacy comes from directory ACLs, not mode bits.
+const posix = process.platform !== "win32";
 
 async function withStore(run: (input: { path: string; now: (value: number) => void;
   store: ReturnType<typeof createTelegramChannelPostJournalStore> }) => Promise<void>) {
@@ -45,6 +48,60 @@ async function withStore(run: (input: { path: string; now: (value: number) => vo
 function isCode(error: unknown, code: TelegramChannelPostJournalError["code"]): boolean {
   return error instanceof TelegramChannelPostJournalError && error.code === code;
 }
+
+test("Consolidated channel-post storage retains unknown publication and confirmation across reopening without root sidecars", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "pi-channel-post-layout-"));
+  try {
+    for (const profileName of ["work", "other"]) {
+      const storage = resolveTelegramServiceJournalStorage("channel-posts", dir, profileName);
+      const options = { ...storage, profileName, tokenSha256, getNowMs: () => 100 };
+      const store = createTelegramChannelPostJournalStore(options);
+      store.prepare({ operationId: "same-operation", channel: "@public_channel", markdown: profileName });
+      assert.equal(store.beginPublication("same-operation").began, true);
+      const reopened = createTelegramChannelPostJournalStore({ ...storage, profileName, tokenSha256 });
+      assert.equal(reopened.get("same-operation")?.state, "outcome-unknown");
+      assert.equal(reopened.beginPublication("same-operation").began, false);
+      reopened.confirmPublished({ operationId: "same-operation", channelId: -100123, messageId: 42 });
+      assert.equal(reopened.get("same-operation")?.markdown, profileName);
+      assert.equal((await readdir(storage.runtimeDir)).some(name => name.endsWith(".tmp")), false);
+    }
+    const root = resolveTelegramTempDir(dir);
+    assert.deepEqual((await readdir(root)).sort(), ["journals", "runtime"]);
+    assert.equal((await readdir(join(root, "journals"))).length, 2);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test("Consolidated channel-post runtime guard grants one issuance across actual processes", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "pi-channel-post-race-"));
+  try {
+    const storage = resolveTelegramServiceJournalStorage("channel-posts", dir, "work");
+    const store = createTelegramChannelPostJournalStore({ ...storage, profileName: "work", tokenSha256 });
+    store.prepare({ operationId: "shared", channel: "@public_channel", markdown: "Post" });
+    const args = ["--experimental-strip-types", "tests/fixtures/channel-post-worker.ts", storage.path, "work", tokenSha256,
+      "begin", "shared", "", "", storage.runtimeDir];
+    const results = await Promise.all([execFileAsync(process.execPath, args), execFileAsync(process.execPath, args)]);
+    assert.deepEqual(results.map(result => (JSON.parse(result.stdout) as { began: boolean }).began).sort(), [false, true]);
+    assert.equal(store.get("shared")?.state, "outcome-unknown");
+    assert.equal(store.beginPublication("shared").began, false);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test("Consolidated channel-post constructor retains physical identity and refuses a foreign service namespace", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "pi-channel-post-identity-"));
+  try {
+    const original = resolveTelegramServiceJournalStorage("channel-posts", dir, "work");
+    const replacement = resolveTelegramServiceJournalStorage("channel-posts", dir, "other");
+    const options = { ...original, profileName: "work", tokenSha256 };
+    const store = createTelegramChannelPostJournalStore(options);
+    Object.assign(options, replacement, { profileName: "other" });
+    store.prepare({ operationId: "retained", channel: "@public_channel", markdown: "retained" });
+    const reopened = createTelegramChannelPostJournalStore({ ...original, profileName: "work", tokenSha256 });
+    assert.equal(reopened.get("retained")?.state, "prepared");
+    assert.equal(createTelegramChannelPostJournalStore({ ...replacement, profileName: "other", tokenSha256 }).list().length, 0);
+    assert.throws(() => createTelegramChannelPostJournalStore({ ...original, profileName: "work", tokenSha256,
+      runtimeDir: join(dir, "foreign-runtime") }), /approved absolute path/u);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
 
 test("Channel post journal fences publication before issuance and confirms one exact post", async () => {
   await withStore(async ({ path, store, now }) => {
@@ -236,13 +293,15 @@ test("Channel post journal retains unknown outcomes and refuses invalid identity
     assert.throws(() => store.list(), error => isCode(error, "conflict"));
     await writeFile(path, JSON.stringify({ version: 1, profile: "other", tokenSha256, records: [] }));
     assert.throws(() => store.list(), error => isCode(error, "conflict"));
-    await rm(path);
-    await symlink("/etc/passwd", path);
-    assert.throws(() => store.list(), error => isCode(error, "invalid"));
-    await rm(path);
-    await writeFile(path, JSON.stringify({ version: 1, profile: "work", tokenSha256, records: [] }),
-      { mode: 0o644 });
-    assert.throws(() => store.list(), error => isCode(error, "invalid"));
+    if (posix) {
+      await rm(path);
+      await symlink("/etc/passwd", path);
+      assert.throws(() => store.list(), error => isCode(error, "invalid"));
+      await rm(path);
+      await writeFile(path, JSON.stringify({ version: 1, profile: "work", tokenSha256, records: [] }),
+        { mode: 0o644 });
+      assert.throws(() => store.list(), error => isCode(error, "invalid"));
+    }
   });
 });
 
@@ -296,11 +355,13 @@ test("Channel media inspection resolves supported kinds and binds content identi
     await assert.rejects(inspectTelegramChannelPostMedia(join(dir, "clip.gif")),
       error => error instanceof TelegramChannelPostValidationError &&
         /Unsupported channel media type/u.test(error.message));
-    const linkPath = join(dir, "linked.png");
-    await symlink(photoPath, linkPath);
-    await assert.rejects(inspectTelegramChannelPostMedia(linkPath),
-      error => error instanceof TelegramChannelPostValidationError &&
-        /without symbolic links/u.test(error.message));
+    if (posix) {
+      const linkPath = join(dir, "linked.png");
+      await symlink(photoPath, linkPath);
+      await assert.rejects(inspectTelegramChannelPostMedia(linkPath),
+        error => error instanceof TelegramChannelPostValidationError &&
+          /without symbolic links/u.test(error.message));
+    }
     await assert.rejects(inspectTelegramChannelPostMedia(join(dir, "missing.png")),
       error => error instanceof TelegramChannelPostValidationError &&
         /readable regular local file/u.test(error.message));

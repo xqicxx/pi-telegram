@@ -12,6 +12,7 @@ import test from "node:test";
 import {
   TELEGRAM_SYNC_SLICES,
   createTelegramLeaderHealthRuntime,
+  createTelegramPreservedLeaderQuitHandler,
   createTelegramManualThreadDisconnectHandler,
   createTelegramObservedTopicLifecycleSyncHandler,
   createTelegramProvisioningActivityRuntime,
@@ -24,7 +25,6 @@ import {
   markTelegramSyncSliceSuspect,
   recoverStaleTelegramTopicApiError,
   settleStaleTelegramTopicExecutionFailure,
-  shouldReconcileTelegramSync,
 } from "../lib/sync.ts";
 import { TelegramApiStaleTargetError } from "../lib/telegram-api.ts";
 import {
@@ -36,7 +36,11 @@ import {
   createTelegramTopicTargetStore,
   createTelegramWorkspaceBindingIdentity,
 } from "../lib/threads.ts";
-import { createTelegramWorkspaceOperationRuntime } from "../lib/workspace-retirement.ts";
+import {
+  createTelegramWorkspaceOperationRuntime,
+  createTelegramWorkspaceSlotRotation,
+} from "../lib/workspace-retirement.ts";
+import { TelegramWorkspaceSlotUnavailableError } from "../lib/workspace-slots.ts";
 
 async function runWorkspaceOperation<T>(
   _input: {
@@ -71,26 +75,6 @@ test("Telegram sync state runtime owns transitions and nested provisioning activ
   provisioning.end();
   provisioning.end();
   assert.equal(provisioning.isActive(), false);
-});
-
-test("Telegram sync reconciliation is demand-driven, not per ordinary action", () => {
-  for (const trigger of [
-    "startup",
-    "reload",
-    "topic-lifecycle",
-    "stale-api-error",
-    "setup-change",
-    "pairing-change",
-    "follower-register",
-    "follower-prune",
-    "status-request",
-    "leader-health-tick",
-  ] as const) {
-    assert.equal(shouldReconcileTelegramSync(trigger), true);
-  }
-
-  assert.equal(shouldReconcileTelegramSync("ordinary-message"), false);
-  assert.equal(shouldReconcileTelegramSync("ordinary-send"), false);
 });
 
 function createTopicStore(
@@ -647,6 +631,59 @@ test("Leader thread sync reuses same-process legacy leader topic across reload",
       ),
       true,
     );
+  } finally {
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
+test("Leader Workspace recovery publishes the canonical retained slot for the exact session", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "pi-telegram-leader-canonical-slot-"));
+  const store = createTelegramTopicTargetStore({
+    path: join(dir, "telegram-targets.json"),
+    getNowMs: () => 2000,
+  });
+  try {
+    const retained = createTelegramWorkspaceBindingIdentity("/repo", 0, "old-session")!;
+    store.upsertWorkspaceBinding({
+      ...retained,
+      target: { chatId: 7, threadId: 41 },
+      threadName: "Xylem",
+      slot: "X",
+      updatedAtMs: 1,
+    });
+    store.upsert({
+      profileKey: "leader:42:1",
+      owner: { kind: "leader", cwd: "/repo", instanceId: "42:1" },
+      target: { chatId: 7, threadId: 41 },
+      status: "active",
+      createdAtMs: 1,
+      updatedAtMs: 1,
+      instanceId: "42:1",
+      threadName: "Xylem",
+      slot: "X",
+    });
+    await store.persist();
+
+    const result = await ensureTelegramLeaderThreadBinding({
+      getAllowedUserId: () => 7,
+      instanceId: "42:2",
+      cwd: "/repo",
+      sessionId: "old-session",
+      topicTargetStore: store,
+      async probeWorkspaceBinding() {},
+      async callApi<TResponse>() {
+        assert.fail("same-session recovery must not call Telegram");
+        return {} as TResponse;
+      },
+      recordEvent() {},
+    });
+
+    assert.equal(result?.target.threadId, 41);
+    assert.equal(result?.slot, "X");
+    assert.equal(result?.threadName, "Xylem");
+    assert.equal(store.getByProfileKey("cwd:/repo")?.slot, "X");
+    assert.equal(store.list().find((record) => record.instanceId === "42:2")?.slot, "X");
+    assert.equal(store.allocateSlot("manual:follower"), "Y");
   } finally {
     await rm(dir, { force: true, recursive: true });
   }
@@ -1480,6 +1517,86 @@ test("Observed topic lifecycle stops before state or store mutation behind retai
   }
 });
 
+test("Preserved leader quit requires unchanged authority, completed suspension and profile admission", async () => {
+  for (const race of ["none", "unowned", "running", "cleanup-enabled", "policy-unknown", "pending-cleanup", "early-profile", "session", "epoch", "profile", "resumed", "replacement", "fenced"] as const) {
+    const dir = await mkdtemp(join(tmpdir(), "pi-telegram-preserved-leader-"));
+    const path = join(dir, "state.json");
+    let epoch: number | undefined = race === "unowned" ? undefined : 1;
+    let profile = "default";
+    let current = true;
+    let suspended = false;
+    let armed = false;
+    let loads = 0;
+    const ledger = createTelegramWorkspaceAdmissionLedger({ path: join(dir, "admission.json"),
+      profileKey: "default", owner: { processId: process.pid, processBirthId: `${process.pid}:leader-quit` },
+      getProcessLiveness: () => "alive" });
+    const operations = createTelegramWorkspaceOperationRuntime({ getWorkspaceAdmission: () => ledger });
+    const target = { chatId: 7, threadId: 42 };
+    const record = { profileKey: "cwd:/repo", owner: { kind: "leader" as const, cwd: "/repo", instanceId: "leader" },
+      instanceId: "leader", target, status: "active" as const, slot: "A", createdAtMs: 1, updatedAtMs: 1 };
+    const store = createTelegramTopicTargetStore({ path, getNowMs: () => 1000,
+      commitPersist(commit) {
+        if (armed) {
+          assert.ok(ledger.read().leases.some((lease) => lease.operationKind === "workspace.preserve-leader-quit"));
+          if (race === "session") current = false;
+          if (race === "epoch") epoch = 2;
+          if (race === "profile") profile = "other";
+          if (race === "resumed") suspended = false;
+          if (race === "replacement") store.upsert({ ...record, instanceId: "replacement",
+            owner: { ...record.owner, instanceId: "replacement" } });
+        }
+        commit();
+        return true;
+      },
+    });
+    const load = store.load;
+    store.load = async () => { if (armed) loads++; await load(); };
+    try {
+      store.upsert(record);
+      store.upsertWorkspaceBinding({ ...createTelegramWorkspaceBindingIdentity("/repo", 0, "session")!,
+        target, slot: "A", updatedAtMs: 1, journalBindingKeys: [], journalBindingsComplete: true });
+      if (race === "pending-cleanup") store.upsertPendingCleanup({
+        id: "pending", owner: "leader", instanceId: "leader", runtimeGeneration: "leader:1",
+        target, requestedAtMs: 1,
+      });
+      await store.persist();
+      const prepare = createTelegramPreservedLeaderQuitHandler({
+        instanceId: "leader", topicTargetStore: store, getCurrentLeaderEpoch: () => epoch,
+        getProfileName: () => profile, isPollingSuspended: () => suspended,
+        resolveAutomaticThreadCleanupEnabled: () => race === "policy-unknown"
+          ? undefined as unknown as boolean : race === "cleanup-enabled",
+        runWorkspaceOperation: operations.run,
+      });
+      const preserve = prepare(() => current);
+      assert.equal(typeof preserve, race === "unowned" ? "undefined" : "function");
+      assert.equal(loads, 0, "preparation does not access Thread state outside admission");
+      if (race === "early-profile") profile = "other";
+      if (race === "fenced") assert.equal(ledger.acquireRetirementFence({
+        operationId: "retirement", retirementIntentId: "intent", bindingKey: "other", slot: "B",
+        target: { chatId: 7, threadId: 99 }, leaderEpoch: 1, retirementRequestedAtMs: 1,
+      }).kind, "acquired");
+      suspended = race !== "running";
+      armed = true;
+      if (race === "fenced" || race === "replacement") {
+        await assert.rejects(preserve!, race === "fenced" ? /blocked by retirement/ : /not committed/);
+      } else await preserve?.();
+      const saved = createTelegramTopicTargetStore({ path });
+      await saved.load();
+      assert.equal(saved.list().length, race === "none" ? 0 : 1, race);
+      assert.equal(saved.listWorkspaceBindings()[0]?.inactiveSinceMs, race === "none" ? 1000 : undefined, race);
+      assert.deepEqual(saved.listSyncObservations(), []);
+      assert.equal(saved.listWorkspaceBindings()[0]?.slot, "A");
+      if (["unowned", "running", "cleanup-enabled", "policy-unknown", "early-profile", "fenced"].includes(race)) {
+        assert.equal(loads, 0, race);
+      }
+      if (race === "pending-cleanup") assert.equal(saved.listPendingCleanups().length, 1);
+      assert.deepEqual(ledger.read().leases, []);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+});
+
 test("Thread disconnect assembly distinguishes manual stop from restart suspension", async () => {
   const events: string[] = [];
   const assembly = createTelegramThreadDisconnectAssembly({
@@ -1617,17 +1734,193 @@ test("Thread disconnect and restart cleanup stop before mutation behind every re
           },
         });
 
-        await assert.rejects(
-          () => assembly[testCase.entrypoint](),
-          (error) => error instanceof TelegramWorkspaceAdmissionError &&
-            error.code === "admission-blocked",
-        );
+        if (testCase.entrypoint === "disconnect") {
+          // A blocked Workspace admission must never leave the local transport running.
+          const message = await assembly.disconnect();
+          assert.equal(message, "stopped. Thread cleanup was not confirmed. Check /telegram-status --debug.");
+          assert.deepEqual(mutations, ["stop-polling"]);
+        } else {
+          await assert.rejects(
+            () => assembly[testCase.entrypoint](),
+            (error) => error instanceof TelegramWorkspaceAdmissionError &&
+              error.code === "admission-blocked",
+          );
+          assert.deepEqual(mutations, []);
+        }
         assert.deepEqual(operationKinds, [testCase.operationKind]);
-        assert.deepEqual(mutations, []);
       } finally {
         await rm(dir, { recursive: true, force: true });
       }
     }
+  }
+});
+
+test("Manual disconnect stops the transport when Workspace admission reports corruption", async () => {
+  const events: string[] = [];
+  const assembly = createTelegramThreadDisconnectAssembly({
+    instanceId: "leader-runtime:1",
+    getCurrentThreadRecord: () => ({
+      owner: { kind: "leader" },
+      instanceId: "leader-runtime:1",
+      target: { chatId: 7, threadId: 42 },
+    }),
+    topicTargetStore: {
+      list: () => [],
+      markStaleByTarget: () => false,
+      persist: async () => {},
+      upsertPendingCleanup: () => {},
+      removePendingCleanup: () => false,
+    },
+    callApi: async <TResponse>() => ({ ok: true }) as TResponse,
+    getCurrentLeaderEpoch: () => 1,
+    getLeaderTarget: () => undefined,
+    clearLeaderTarget: () => {
+      events.push("clear-leader-target");
+    },
+    getSyncState: createUnknownTelegramSyncState,
+    setSyncState: () => {
+      events.push("set-sync-state");
+    },
+    stopPolling: async () => {
+      events.push("stop-polling");
+      return "Telegram bridge disconnected.";
+    },
+    suspendPolling: async () => {
+      events.push("suspend-polling");
+    },
+    recordRuntimeEvent: (category, error, details) => {
+      const message = error instanceof Error ? error.message : String(error);
+      events.push(`event:${category}:${message}:${details?.phase}`);
+    },
+    runWorkspaceOperation() {
+      // Mirrors a malformed or unreadable Workspace admission state file.
+      throw new Error("Telegram Workspace admission state is malformed.");
+    },
+  });
+
+  assert.equal(
+    await assembly.disconnect(),
+    "Telegram bridge disconnected. Thread cleanup was not confirmed. Check /telegram-status --debug.",
+  );
+  assert.deepEqual(events, [
+    "event:connection:Telegram Workspace admission state is malformed.:disconnect-cleanup",
+    "stop-polling",
+  ]);
+});
+
+test("Manual disconnect fences cleanup and fallback stop across connection replacement", async () => {
+  for (const replaceAt of ["admission", "intent-persist", "api-reply"] as const) {
+    let generation = 1;
+    let captures = 0;
+    let stops = 0;
+    let reads = 0;
+    const apiCalls: string[] = [];
+    const mutations: string[] = [];
+    const assembly = createTelegramThreadDisconnectAssembly({
+      instanceId: "leader-runtime:1",
+      captureStopPolling() {
+        captures++;
+        const expected = generation;
+        return {
+          isCurrent: () => generation === expected,
+          async stop() {
+            if (generation !== expected) throw new Error("Telegram disconnect was superseded by a new connection.");
+            stops++;
+            return "stopped";
+          },
+        };
+      },
+      getCurrentThreadRecord() {
+        reads++;
+        return { owner: { kind: "leader" }, instanceId: "leader-runtime:1", target: { chatId: 7, threadId: 42 } };
+      },
+      topicTargetStore: {
+        list: () => [],
+        upsertPendingCleanup: () => { mutations.push("intent"); },
+        persist: async () => { if (replaceAt === "intent-persist") generation++; },
+        markStaleByTarget: () => { mutations.push("mark-stale"); return false; },
+        removePendingCleanup: () => { mutations.push("remove-intent"); return false; },
+      },
+      async callApi<TResponse>(method: string) {
+        apiCalls.push(method);
+        if (replaceAt === "api-reply") generation++;
+        return { ok: true } as TResponse;
+      },
+      getCurrentLeaderEpoch: () => 1,
+      getLeaderTarget: () => ({ chatId: 7, threadId: 42 }),
+      clearLeaderTarget: () => { mutations.push("clear-target"); },
+      getSyncState: createUnknownTelegramSyncState,
+      setSyncState: () => { mutations.push("sync"); },
+      stopPolling: async () => { assert.fail("Uncaptured stop must not touch the replacement"); },
+      suspendPolling: async () => {},
+      recordRuntimeEvent: () => {},
+      async runWorkspaceOperation(_input, operation) {
+        if (replaceAt === "admission") generation++;
+        return operation();
+      },
+    });
+    await assert.rejects(assembly.disconnect(), /superseded by a new connection/);
+    assert.equal(captures, 1);
+    assert.equal(stops, 0);
+    assert.deepEqual(apiCalls, replaceAt === "api-reply" ? ["closeForumTopic"] : []);
+    assert.deepEqual(mutations, replaceAt === "admission" ? [] : ["intent"]);
+    assert.equal(reads, replaceAt === "admission" ? 0 : 1);
+  }
+});
+
+test("Manual disconnect does not retry failed stop or claim uncertain cleanup was skipped", async () => {
+  for (const failureAt of ["admission", "follower-reply", "stop"] as const) {
+    let stops = 0;
+    const apiCalls: string[] = [];
+    const diagnostics: string[] = [];
+    const assembly = createTelegramThreadDisconnectAssembly({
+      instanceId: "leader-runtime:1",
+      getCurrentThreadRecord: () => failureAt === "stop" ? undefined : {
+        owner: { kind: failureAt === "follower-reply" ? "manual-follower" : "leader" },
+        instanceId: "leader-runtime:1", target: { chatId: 7, threadId: 42 },
+      },
+      async disconnectFollowerThread() {
+        apiCalls.push("follower.disconnect");
+        throw new Error("Follower deletion reply unknown: private details");
+      },
+      topicTargetStore: {
+        list: () => [],
+        upsertPendingCleanup: () => {},
+        persist: async () => {},
+        markStaleByTarget: () => false,
+        removePendingCleanup: () => false,
+      },
+      async callApi<TResponse>(method: string) {
+        apiCalls.push(method);
+        return { ok: true } as TResponse;
+      },
+      getCurrentLeaderEpoch: () => failureAt === "follower-reply" ? undefined : 1,
+      getLeaderTarget: () => undefined,
+      clearLeaderTarget: () => {},
+      getSyncState: createUnknownTelegramSyncState,
+      setSyncState: () => {},
+      async stopPolling() {
+        stops++;
+        if (failureAt === "stop") throw new Error("Release reply unknown");
+        return "Telegram bridge disconnected.";
+      },
+      suspendPolling: async () => {},
+      recordRuntimeEvent: (_category, _error, details) => { diagnostics.push(String(details?.phase)); },
+      async runWorkspaceOperation(_input, operation) {
+        if (failureAt === "admission") throw new Error("Admission unavailable: private details");
+        return operation();
+      },
+    });
+    if (failureAt === "stop") {
+      await assert.rejects(assembly.disconnect(), /Release reply unknown/);
+    } else {
+      assert.equal(await assembly.disconnect(),
+        "Telegram bridge disconnected. Thread cleanup was not confirmed. Check /telegram-status --debug.");
+      assert.ok(diagnostics.includes("disconnect-cleanup"));
+    }
+    assert.equal(stops, 1, "An uncertain stop outcome cannot authorize another teardown");
+    if (failureAt === "stop") assert.deepEqual(diagnostics, ["disconnect-stop"]);
+    assert.deepEqual(apiCalls, failureAt === "follower-reply" ? ["follower.disconnect"] : []);
   }
 });
 
@@ -1676,6 +1969,123 @@ test("Manual follower disconnect delegates thread deletion to its live leader", 
   assert.deepEqual(calls, []);
   assert.equal(followerDisconnects, 1);
   assert.equal(persisted, 0);
+});
+
+test("Manual follower disconnect without a live leader stops locally and keeps the Thread", async () => {
+  const calls: unknown[] = [];
+  let stops = 0;
+  let syncState = createUnknownTelegramSyncState();
+  const disconnect = createTelegramManualThreadDisconnectHandler({
+    instanceId: "follower-runtime:1",
+    getCurrentThreadRecord: () => ({
+      owner: { kind: "manual-follower" },
+      instanceId: "follower-runtime:1",
+      target: { chatId: 7, threadId: 42 },
+    }),
+    topicTargetStore: {
+      list: () => [],
+      markStaleByTarget: () => false,
+      upsertPendingCleanup: () => undefined,
+      removePendingCleanup: () => false,
+      persist: async () => undefined,
+    },
+    callApi: async <TResponse>(method: string, body: Record<string, unknown>) => {
+      calls.push({ method, body });
+      return { ok: true } as TResponse;
+    },
+    getLeaderTarget: () => undefined,
+    clearLeaderTarget: () => undefined,
+    disconnectFollowerThread: async () => false,
+    getSyncState: () => syncState,
+    setSyncState: (state) => {
+      syncState = state;
+    },
+    stopPolling: async () => {
+      stops += 1;
+      return "stopped";
+    },
+    recordRuntimeEvent: () => undefined,
+    runWorkspaceOperation,
+    getNowMs: () => 2000,
+  });
+
+  assert.equal(await disconnect(), "Telegram bridge disconnected. Thread kept: no live leader could delete it.");
+  assert.equal(stops, 1, "The operator can always stop a follower whose leader is gone or in classic mode");
+  assert.deepEqual(calls, [], "No direct Bot API deletion is attempted");
+});
+
+test("Confirmed leader disconnect and restart cleanup preserve pressure-reclaimable slots across restart", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "pi-telegram-leader-cleanup-rotation-"));
+  const path = join(dir, "state.json");
+  let nowMs = 1000;
+  try {
+    const admission = createTelegramWorkspaceAdmissionLedger({
+      path: join(dir, "admission.json"), profileKey: "default",
+      owner: { processId: process.pid, processBirthId: `${process.pid}:cleanup-fixture` },
+      getProcessLiveness: () => "alive",
+    });
+    const operations = createTelegramWorkspaceOperationRuntime({ getWorkspaceAdmission: () => admission });
+    const store = createTelegramTopicTargetStore({ path, getNowMs: () => nowMs,
+      getExternalReservedSlots: admission.listReservedSlots });
+    let syncState = createUnknownTelegramSyncState();
+    let deletions = 0;
+    for (let index = 0; index < 26; index++) {
+      const cwd = `/repo/${index}`;
+      const instanceId = `leader-${index}`;
+      const slot = String.fromCharCode(65 + index);
+      const target = { chatId: 7, threadId: 40 + index };
+      store.upsertWorkspaceBinding({
+        ...createTelegramWorkspaceBindingIdentity(cwd, 0, `session-${index}`)!,
+        target, slot, updatedAtMs: 1, journalBindingKeys: [], journalBindingsComplete: true,
+      });
+      const record = { profileKey: `cwd:${cwd}`, owner: { kind: "leader" as const, cwd, instanceId },
+        instanceId, target, slot, status: "active" as const, createdAtMs: 1, updatedAtMs: 1 };
+      store.upsert(record);
+      await store.persist();
+      const cleanup = createTelegramThreadDisconnectAssembly({
+        instanceId, getCurrentThreadRecord: () => record, topicTargetStore: store,
+        async callApi<TResponse>(method: string) {
+          if (method === "deleteForumTopic") deletions++;
+          return true as TResponse;
+        },
+        getCurrentLeaderEpoch: () => 1, getLeaderTarget: () => target, clearLeaderTarget() {},
+        getSyncState: () => syncState, setSyncState(state) { syncState = state; },
+        async stopPolling() { return "stopped"; }, async suspendPolling() {}, recordRuntimeEvent() {},
+        runWorkspaceOperation: operations.run, getNowMs: () => nowMs,
+      });
+      if (index % 2) await cleanup.cleanupForSessionRestart();
+      else await cleanup.disconnect();
+      assert.equal(store.getWorkspaceBinding(cwd, "a", `session-${index}`)?.inactiveSinceMs, nowMs);
+      nowMs++;
+    }
+    const restored = createTelegramTopicTargetStore({ path, getNowMs: () => nowMs,
+      getExternalReservedSlots: admission.listReservedSlots });
+    await restored.load();
+    assert.equal(deletions, 26);
+    assert.equal(restored.list().length, 0);
+    assert.equal(restored.listWorkspaceBindings().length, 26);
+    const clear = () => ({ liveOwner: "clear" as const, acceptedWork: "clear" as const,
+      deliveryAuthority: "clear" as const });
+    assert.ok(restored.captureWorkspaceSlotOccupancy(clear).bindings.every(binding => binding.protection === "eligible"));
+    const rotation = createTelegramWorkspaceSlotRotation({
+      store: restored, getAdmission: () => admission, getLeaderEpoch: () => 2,
+      runExclusive: operations.runExclusive, getExternalProtection: clear, recordEvent() {},
+      async deleteThread(authorize) {
+        assert.deepEqual(authorize(), { chatId: 7, threadId: 40 });
+        throw Object.assign(new Error("Bad Request: message thread not found"), { status: 400 });
+      },
+    });
+    const slot = await rotation(() => operations.run({ operationId: "fresh-leader",
+      operationKind: "workspace.provision-leader", scopes: [{ kind: "profile" }] }, async () => {
+      const claim = restored.claimWorkspaceIdentity("/fresh", "new-leader", undefined, { sessionId: "new-session" });
+      if (!claim) throw new TelegramWorkspaceSlotUnavailableError();
+      return claim.slot;
+    }));
+    assert.equal(slot, "A");
+    assert.equal(restored.listWorkspaceBindings().length, 25);
+    assert.equal(admission.read().fence, undefined);
+    assert.deepEqual(admission.read().leases, []);
+  } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
 test("Manual leader disconnect releases transport after cleanup loses epoch", async () => {

@@ -6,22 +6,27 @@
 
 import { assertTelegramInlineKeyboardCallbackData } from "./keyboard.ts";
 import {
-  getTelegramTargetThreadParams,
-  type TelegramTarget,
-} from "./target.ts";
-import { isTelegramApiCommitUnknownError } from "./telegram-api.ts";
-import type {
-  TelegramInputRichMessage,
-  TelegramReplyParameters,
-  TelegramInputRichBlock,
-  TelegramSendRichMessageBody,
-  TelegramSentMessage,
-} from "./telegram-api.ts";
-import {
   renderTelegramMessage,
   type TelegramRenderedChunk,
   type TelegramRenderMode,
 } from "./rendering.ts";
+import {
+  getTelegramTargetThreadParams,
+  type TelegramTarget,
+} from "./target.ts";
+import type {
+  TelegramApiCallOptions,
+  TelegramInputRichBlock,
+  TelegramInputRichMessage,
+  TelegramReplyParameters,
+  TelegramSendRichMessageBody,
+  TelegramSentMessage,
+} from "./telegram-api.ts";
+import {
+  assertTelegramApiCallAuthority,
+  isTelegramApiCommitUnknownError,
+  TelegramApiAuthorityError,
+} from "./telegram-api.ts";
 
 export {
   renderTelegramMessage,
@@ -38,37 +43,8 @@ export function renderTelegramMarkdownToHtmlDraft(markdown: string): string {
 export const TELEGRAM_RICH_MESSAGE_MAX_CHARS = 32768;
 export const TELEGRAM_RICH_MESSAGE_MAX_BLOCKS = 500;
 
-// --- Reply Dedup ---
-
-/** Non-persistent reply deduplication for a single agent turn.
- *  First reply to a prompt gets `reply_parameters.message_id`;
- *  subsequent replies in the same turn skip it to avoid stacking
- *  duplicate reply headers in the chat viewport. */
-export interface ReplyDedupRuntime {
-  /** Returns true if this is the first reply for the given prompt
-   *  message id in the current turn. Side-effect: marks it replied. */
-  shouldReply(promptMessageId: number): boolean;
-  /** Reset the tracker when a new prompt enters the queue. */
-  reset(): void;
-}
-
-export function createReplyDedupRuntime(): ReplyDedupRuntime {
-  const replied = new Map<number, boolean>();
-  return {
-    shouldReply(promptMessageId: number): boolean {
-      if (replied.has(promptMessageId)) return false;
-      replied.set(promptMessageId, true);
-      return true;
-    },
-    reset(): void {
-      replied.clear();
-    },
-  };
-}
-
-// --- Transport-level dedup ---
-
 const lastRepliedToMessageIdByTarget = new Map<string, number>();
+const replyDedupPreservedOnNextReset = new Map<string, number>();
 let replyDedupGeneration = 0;
 
 function getReplyDedupTargetKey(
@@ -84,6 +60,23 @@ function getReplyDedupTargetKey(
 export function resetTransportReplyDedup(): void {
   replyDedupGeneration += 1;
   lastRepliedToMessageIdByTarget.clear();
+  for (const [key, messageId] of replyDedupPreservedOnNextReset) {
+    lastRepliedToMessageIdByTarget.set(key, messageId);
+  }
+  replyDedupPreservedOnNextReset.clear();
+}
+
+/** Keeps a successfully published transition notice as the first reply of the
+ * next agent turn. The following agent-start reset consumes this one-shot
+ * preservation, so later messages in that turn do not repeat the reply header. */
+export function preserveTransportReplyDedupOnNextReset(
+  chatId: number,
+  messageId: number,
+  target?: TelegramTarget,
+): void {
+  const key = getReplyDedupTargetKey(chatId, target);
+  if (lastRepliedToMessageIdByTarget.get(key) !== messageId) return;
+  replyDedupPreservedOnNextReset.set(key, messageId);
 }
 
 export function buildTelegramReplyParameters(
@@ -121,6 +114,7 @@ export async function withTelegramReplyParameters<T>(
     if (
       parameters &&
       !isTelegramApiCommitUnknownError(error) &&
+      !(error instanceof TelegramApiAuthorityError && error.requestIssued) &&
       generation === replyDedupGeneration &&
       lastRepliedToMessageIdByTarget.get(key) === messageId
     ) {
@@ -131,11 +125,26 @@ export async function withTelegramReplyParameters<T>(
   }
 }
 
-function getAgentMessageField(message: unknown, field: string): unknown {
-  if (typeof message !== "object" || message === null || !(field in message)) {
-    return undefined;
-  }
-  return Reflect.get(message, field);
+/** Agent-message fields the reply layer probes; each is validated on first read. */
+interface TelegramAgentMessageView {
+  role?: unknown;
+  content?: unknown;
+  stopReason?: unknown;
+  errorMessage?: unknown;
+}
+
+function asAgentMessageView(message: unknown): TelegramAgentMessageView {
+  return typeof message === "object" && message !== null
+    ? (message as TelegramAgentMessageView)
+    : {};
+}
+
+function getAgentMessageField(
+  message: unknown,
+  field: "role" | "stopReason" | "errorMessage",
+): string | undefined {
+  const value = asAgentMessageView(message)[field];
+  return typeof value === "string" ? value : undefined;
 }
 
 export function isAssistantAgentMessage(message: unknown): boolean {
@@ -156,7 +165,7 @@ function extractAgentTextContent(content: unknown): string {
 }
 
 export function getAgentMessageText(message: unknown): string {
-  return extractAgentTextContent(getAgentMessageField(message, "content"));
+  return extractAgentTextContent(asAgentMessageView(message).content);
 }
 
 export function extractLatestAssistantMessageText(
@@ -232,29 +241,40 @@ export interface TelegramReplyOwnershipRecorder {
 
 export interface TelegramReplyDeliveryDeps<TReplyMarkup> {
   recordOwnership?: TelegramReplyOwnershipRecorder["record"];
-  sendMessage: (body: {
-    chat_id: number;
-    text: string;
-    parse_mode?: "HTML";
-    reply_markup?: TReplyMarkup;
-    reply_parameters?: TelegramReplyParameters;
-    reply_to_message_id?: number;
-    message_thread_id?: number;
-  }) => Promise<TelegramSentMessage>;
-  editMessage: (body: {
-    chat_id: number;
-    message_id: number;
-    text?: string;
-    rich_message?: TelegramInputRichMessage;
-    parse_mode?: "HTML";
-    reply_markup?: TReplyMarkup;
-    message_thread_id?: number;
-  }) => Promise<unknown>;
+  sendMessage: (
+    body: {
+      chat_id: number;
+      text: string;
+      parse_mode?: "HTML";
+      reply_markup?: TReplyMarkup;
+      reply_parameters?: TelegramReplyParameters;
+      reply_to_message_id?: number;
+      message_thread_id?: number;
+    },
+    options?: Pick<TelegramApiCallOptions, "assertAuthority">,
+  ) => Promise<TelegramSentMessage>;
+  editMessage: (
+    body: {
+      chat_id: number;
+      message_id: number;
+      text?: string;
+      rich_message?: TelegramInputRichMessage;
+      parse_mode?: "HTML";
+      reply_markup?: TReplyMarkup;
+      message_thread_id?: number;
+    },
+    options?: Pick<TelegramApiCallOptions, "assertAuthority">,
+  ) => Promise<unknown>;
 }
 
-export interface TelegramReplyTargetOptions {
+export interface TelegramReplyTargetOptions extends Pick<
+  TelegramApiCallOptions,
+  "assertAuthority"
+> {
   target?: TelegramTarget;
   replyToMessageId?: number;
+  /** Rich blocks for a card that must ship as one rich message instead of text. */
+  blocks?: readonly TelegramInputRichBlock[];
 }
 
 export interface TelegramReplyTransport<TReplyMarkup> {
@@ -300,32 +320,75 @@ export async function sendTelegramRenderedChunks<TReplyMarkup>(
     replyMarkup?: TReplyMarkup;
   },
 ): Promise<number | undefined> {
-  assertTelegramInlineKeyboardCallbackData(options?.replyMarkup);
-  let lastMessageId: number | undefined;
-  for (const [index, chunk] of chunks.entries()) {
-    const sent = await withTelegramReplyParameters(
-      chatId,
-      index === 0 ? options?.replyToMessageId : undefined,
-      options?.target,
-      (replyParameters) =>
-        deps.sendMessage({
+  return sendTelegramChunkSequence(
+    chatId,
+    chunks,
+    options?.replyToMessageId,
+    options,
+    deps.recordOwnership,
+    (chunk, fields, callOptions) =>
+      deps.sendMessage(
+        {
           chat_id: chatId,
           text: chunk.text,
           parse_mode: chunk.parseMode,
-          reply_markup:
-            index === chunks.length - 1 ? options?.replyMarkup : undefined,
-          ...(replyParameters ? { reply_parameters: replyParameters } : {}),
-          ...(options?.target
-            ? getTelegramTargetThreadParams(options.target)
-            : {}),
-        }),
-    );
-    lastMessageId = sent.message_id;
-    deps.recordOwnership?.({
+          ...fields,
+        },
+        callOptions,
+      ),
+  );
+}
+
+/**
+ * Ordered chunk delivery: only the first chunk replies, only the last carries markup, and authority is rechecked
+ * before issuance and after every response/ownership publication.
+ */
+async function sendTelegramChunkSequence<TChunk, TReplyMarkup>(
+  chatId: number,
+  chunks: readonly TChunk[],
+  replyToMessageId: number | undefined,
+  options:
+    (TelegramReplyTargetOptions & { replyMarkup?: TReplyMarkup }) | undefined,
+  recordOwnership: TelegramReplyOwnershipRecorder["record"] | undefined,
+  send: (
+    chunk: TChunk,
+    fields: {
+      reply_markup?: TReplyMarkup;
+      reply_parameters?: TelegramReplyParameters;
+      message_thread_id?: number;
+    },
+    callOptions: Pick<TelegramApiCallOptions, "assertAuthority"> | undefined,
+  ) => Promise<TelegramSentMessage>,
+): Promise<number | undefined> {
+  const target = options?.target && { ...options.target },
+    assertAuthority = options?.assertAuthority,
+    replyMarkup = options?.replyMarkup;
+  assertTelegramInlineKeyboardCallbackData(replyMarkup);
+  let lastMessageId: number | undefined;
+  for (const [index, chunk] of chunks.entries()) {
+    assertTelegramApiCallAuthority(assertAuthority, false);
+    const sent = await withTelegramReplyParameters(
       chatId,
-      messageId: sent.message_id,
-      target: options?.target,
-    });
+      index === 0 ? replyToMessageId : undefined,
+      target,
+      async (replyParameters) => {
+        const sent = await send(
+          chunk,
+          {
+            reply_markup: index === chunks.length - 1 ? replyMarkup : undefined,
+            ...(replyParameters ? { reply_parameters: replyParameters } : {}),
+            ...(target ? getTelegramTargetThreadParams(target) : {}),
+          },
+          assertAuthority ? { assertAuthority } : undefined,
+        );
+        assertTelegramApiCallAuthority(assertAuthority, true);
+        return sent;
+      },
+    );
+    assertTelegramApiCallAuthority(assertAuthority, true);
+    lastMessageId = sent.message_id;
+    recordOwnership?.({ chatId, messageId: sent.message_id, target });
+    assertTelegramApiCallAuthority(assertAuthority, true);
   }
   return lastMessageId;
 }
@@ -337,23 +400,35 @@ export async function editTelegramRenderedMessage<TReplyMarkup>(
   deps: TelegramReplyDeliveryDeps<TReplyMarkup>,
   options?: TelegramReplyTargetOptions & { replyMarkup?: TReplyMarkup },
 ): Promise<number | undefined> {
+  options = { ...options, target: options?.target && { ...options.target } };
+  const assertAuthority = options.assertAuthority;
+  assertTelegramApiCallAuthority(assertAuthority, false);
   assertTelegramInlineKeyboardCallbackData(options?.replyMarkup);
   if (chunks.length === 0) return messageId;
   const [firstChunk, ...remainingChunks] = chunks;
-  deps.recordOwnership?.({ chatId, messageId, target: options?.target });
-  await deps.editMessage({
-    chat_id: chatId,
-    message_id: messageId,
-    text: firstChunk.text,
-    parse_mode: firstChunk.parseMode,
-    reply_markup:
-      remainingChunks.length === 0 ? options?.replyMarkup : undefined,
-    ...(options?.target ? getTelegramTargetThreadParams(options.target) : {}),
-  });
+  if (!assertAuthority)
+    deps.recordOwnership?.({ chatId, messageId, target: options.target });
+  await deps.editMessage(
+    {
+      chat_id: chatId,
+      message_id: messageId,
+      text: firstChunk.text,
+      parse_mode: firstChunk.parseMode,
+      reply_markup:
+        remainingChunks.length === 0 ? options?.replyMarkup : undefined,
+      ...(options?.target ? getTelegramTargetThreadParams(options.target) : {}),
+    },
+    assertAuthority ? { assertAuthority } : undefined,
+  );
+  assertTelegramApiCallAuthority(assertAuthority, true);
+  if (assertAuthority)
+    deps.recordOwnership?.({ chatId, messageId, target: options.target });
+  assertTelegramApiCallAuthority(assertAuthority, true);
   if (remainingChunks.length > 0) {
     return sendTelegramRenderedChunks(chatId, remainingChunks, deps, {
       replyMarkup: options?.replyMarkup,
       target: options?.target,
+      assertAuthority,
     });
   }
   return messageId;
@@ -379,12 +454,14 @@ export async function sendTelegramPlainReply(
   deps: TelegramReplyRuntimeDeps,
   options?: TelegramTextReplyOptions,
 ): Promise<number | undefined> {
+  options = { ...options, target: options?.target && { ...options.target } };
   const chunks = deps.renderTelegramMessage(text, {
     mode: options?.parseMode === "HTML" ? "html" : "plain",
   });
   return deps.sendRenderedChunks(chunks, {
     target: options?.target,
     replyToMessageId: options?.replyToMessageId,
+    assertAuthority: options.assertAuthority,
   });
 }
 
@@ -420,37 +497,56 @@ function normalizeTelegramNativeMarkdownLine(line: string): string {
   );
 }
 
+/** An open fenced code block: its marker character and the minimum closing run length. */
+export interface TelegramMarkdownFence {
+  marker: "`" | "~";
+  length: number;
+}
+
+export function parseTelegramMarkdownFenceOpening(
+  line: string,
+): TelegramMarkdownFence | undefined {
+  const markerText = line.match(/^ {0,3}(`{3,}|~{3,})/)?.[1];
+  return markerText
+    ? { marker: markerText[0] as "`" | "~", length: markerText.length }
+    : undefined;
+}
+
+export function isTelegramMarkdownFenceClosing(
+  line: string,
+  fence: TelegramMarkdownFence,
+): boolean {
+  return new RegExp(`^ {0,3}${fence.marker}{${fence.length},}\\s*$`).test(line);
+}
+
+/** Fence state after one line: outside a fence a marker opens one; inside, a matching marker closes it. */
+function advanceTelegramMarkdownFence(
+  fence: TelegramMarkdownFence | undefined,
+  line: string,
+): TelegramMarkdownFence | undefined {
+  if (!fence) return parseTelegramMarkdownFenceOpening(line);
+  return isTelegramMarkdownFenceClosing(line, fence) ? undefined : fence;
+}
+
 function hasClosingDisplayMathDelimiter(
   lines: readonly string[],
   startIndex: number,
 ): boolean {
-  let fence: { marker: "`" | "~"; length: number } | undefined;
+  let fence: TelegramMarkdownFence | undefined;
   for (let index = startIndex + 1; index < lines.length; index += 1) {
     const line = lines[index] ?? "";
-    const fenceMatch = line.match(/^ {0,3}(`{3,}|~{3,})/);
     if (!fence && line.trim() === "$$") return true;
-    if (!fence && fenceMatch) {
-      const markerText = fenceMatch[1] ?? "```";
-      fence = { marker: markerText[0] as "`" | "~", length: markerText.length };
-      continue;
-    }
-    if (
-      fence &&
-      new RegExp(`^ {0,3}${fence.marker}{${fence.length},}\\s*$`).test(line)
-    ) {
-      fence = undefined;
-    }
+    fence = advanceTelegramMarkdownFence(fence, line);
   }
   return false;
 }
 
 export function normalizeTelegramNativeMarkdown(markdown: string): string {
   const lines = markdown.replace(/\r\n/g, "\n").split("\n");
-  let fence: { marker: "`" | "~"; length: number } | undefined;
+  let fence: TelegramMarkdownFence | undefined;
   let displayMath = false;
   return lines
     .map((line, index) => {
-      const fenceMatch = line.match(/^ {0,3}(`{3,}|~{3,})/);
       const inFence = fence !== undefined;
       if (!inFence && line.trim() === "$$") {
         if (displayMath) {
@@ -463,19 +559,9 @@ export function normalizeTelegramNativeMarkdown(markdown: string): string {
         }
       }
       if (displayMath) return line;
-      if (!inFence && fenceMatch) {
-        const markerText = fenceMatch[1] ?? "```";
-        fence = {
-          marker: markerText[0] as "`" | "~",
-          length: markerText.length,
-        };
-        return line;
-      }
-      if (
-        inFence &&
-        new RegExp(`^ {0,3}${fence?.marker}{${fence?.length},}\\s*$`).test(line)
-      ) {
-        fence = undefined;
+      const nextFence = advanceTelegramMarkdownFence(fence, line);
+      if (nextFence !== fence) {
+        fence = nextFence;
         return line;
       }
       if (!inFence) return normalizeTelegramNativeMarkdownLine(line);
@@ -531,30 +617,19 @@ export function splitTelegramNativeMarkdown(markdown: string): string[] {
 function splitTelegramNativeMarkdownBlocks(markdown: string): string[] {
   const blocks: string[] = [];
   const current: string[] = [];
-  let fence: { marker: "`" | "~"; length: number } | undefined;
+  let fence: TelegramMarkdownFence | undefined;
   const flush = (): void => {
     if (current.length === 0) return;
     blocks.push(current.join("\n"));
     current.length = 0;
   };
   for (const line of markdown.split("\n")) {
-    const fenceMatch = line.match(/^ {0,3}(`{3,}|~{3,})/);
     if (!fence && line.trim().length === 0) {
       flush();
       continue;
     }
     current.push(line);
-    if (!fence && fenceMatch) {
-      const markerText = fenceMatch[1] ?? "```";
-      fence = { marker: markerText[0] as "`" | "~", length: markerText.length };
-      continue;
-    }
-    if (
-      fence &&
-      new RegExp(`^ {0,3}${fence.marker}{${fence.length},}\\s*$`).test(line)
-    ) {
-      fence = undefined;
-    }
+    fence = advanceTelegramMarkdownFence(fence, line);
   }
   flush();
   return blocks;
@@ -568,25 +643,14 @@ function splitTelegramNativeMarkdownCountedBlocks(block: string): string[] {
   }
   const chunks: string[] = [];
   let current: string[] = [];
-  let fence: { marker: "`" | "~"; length: number } | undefined;
+  let fence: TelegramMarkdownFence | undefined;
   for (const line of block.split("\n")) {
-    const fenceMatch = line.match(/^ {0,3}(`{3,}|~{3,})/);
     if (!fence && current.length >= TELEGRAM_RICH_MESSAGE_MAX_BLOCKS) {
       chunks.push(current.join("\n"));
       current = [];
     }
     current.push(line);
-    if (!fence && fenceMatch) {
-      const markerText = fenceMatch[1] ?? "```";
-      fence = { marker: markerText[0] as "`" | "~", length: markerText.length };
-      continue;
-    }
-    if (
-      fence &&
-      new RegExp(`^ {0,3}${fence.marker}{${fence.length},}\\s*$`).test(line)
-    ) {
-      fence = undefined;
-    }
+    fence = advanceTelegramMarkdownFence(fence, line);
   }
   if (current.length > 0) chunks.push(current.join("\n"));
   return chunks;
@@ -630,13 +694,9 @@ function splitTelegramNativeMarkdownLongFenceBlock(
   const lines = block.split("\n");
   const opening = lines[0] ?? "";
   const closing = lines[lines.length - 1] ?? "";
-  const openingMatch = opening?.match(/^ {0,3}(`{3,}|~{3,})/);
-  if (!openingMatch || !closing || lines.length < 2) return undefined;
-  const markerText = openingMatch[1] ?? "```";
-  const marker = markerText[0] as "`" | "~";
-  if (
-    !new RegExp(`^ {0,3}${marker}{${markerText.length},}\\s*$`).test(closing)
-  ) {
+  const openingFence = parseTelegramMarkdownFenceOpening(opening);
+  if (!openingFence || !closing || lines.length < 2) return undefined;
+  if (!isTelegramMarkdownFenceClosing(closing, openingFence)) {
     return undefined;
   }
   const maxContentLength =
@@ -712,61 +772,55 @@ export async function sendTelegramNativeMarkdownReply<TReplyMarkup = unknown>(
     recordOwnership?: TelegramReplyOwnershipRecorder["record"];
     sendRichMessage: (
       body: TelegramSendRichMessageBody,
+      options?: Pick<TelegramApiCallOptions, "assertAuthority">,
     ) => Promise<TelegramSentMessage>;
   },
   options?: TelegramReplyTargetOptions & { replyMarkup?: TReplyMarkup },
 ): Promise<number | undefined> {
-  assertTelegramInlineKeyboardCallbackData(options?.replyMarkup);
-  let lastMessageId: number | undefined;
-  const chunks = splitTelegramNativeMarkdown(markdown);
-  for (const [index, chunk] of chunks.entries()) {
-    const sent = await withTelegramReplyParameters(
-      chatId,
-      index === 0 ? replyToMessageId : undefined,
-      options?.target,
-      (replyParameters) =>
-        deps.sendRichMessage({
-          chat_id: chatId,
-          rich_message: { markdown: chunk },
-          reply_markup:
-            index === chunks.length - 1 ? options?.replyMarkup : undefined,
-          ...(replyParameters ? { reply_parameters: replyParameters } : {}),
-          ...(options?.target
-            ? getTelegramTargetThreadParams(options.target)
-            : {}),
-        }),
-    );
-    lastMessageId = sent.message_id;
-    deps.recordOwnership?.({
-      chatId,
-      messageId: sent.message_id,
-      target: options?.target,
-    });
-  }
-  return lastMessageId;
+  return sendTelegramChunkSequence(
+    chatId,
+    splitTelegramNativeMarkdown(markdown),
+    replyToMessageId,
+    options,
+    deps.recordOwnership,
+    (chunk, fields, callOptions) =>
+      deps.sendRichMessage(
+        { chat_id: chatId, rich_message: { markdown: chunk }, ...fields },
+        callOptions,
+      ),
+  );
 }
 
-export async function sendTelegramNativeRichMessage(
+async function sendTelegramNativeRichMessage(
   chatId: number,
   richMessage: TelegramInputRichMessage,
   deps: {
     recordOwnership?: TelegramReplyOwnershipRecorder["record"];
     sendRichMessage: (
       body: TelegramSendRichMessageBody,
+      options?: Pick<TelegramApiCallOptions, "assertAuthority">,
     ) => Promise<TelegramSentMessage>;
   },
   options?: TelegramReplyTargetOptions,
 ): Promise<number> {
-  const sent = await deps.sendRichMessage({
-    chat_id: chatId,
-    rich_message: richMessage,
-    ...(options?.target ? getTelegramTargetThreadParams(options.target) : {}),
-  });
+  options = { ...options, target: options?.target && { ...options.target } };
+  const assertAuthority = options.assertAuthority;
+  assertTelegramApiCallAuthority(assertAuthority, false);
+  const sent = await deps.sendRichMessage(
+    {
+      chat_id: chatId,
+      rich_message: richMessage,
+      ...(options?.target ? getTelegramTargetThreadParams(options.target) : {}),
+    },
+    assertAuthority ? { assertAuthority } : undefined,
+  );
+  assertTelegramApiCallAuthority(assertAuthority, true);
   deps.recordOwnership?.({
     chatId,
     messageId: sent.message_id,
     target: options?.target,
   });
+  assertTelegramApiCallAuthority(assertAuthority, true);
   return sent.message_id;
 }
 
@@ -777,7 +831,7 @@ export type TelegramAssistantRenderingMode = "rich" | "html";
 
 export interface TelegramRenderedMessageRuntimeDeps<TReplyMarkup> {
   /** Rich-message edit path, used when a menu card carries rich blocks. */
-  editMessage: TelegramRenderedMessageDeliveryRuntimeDeps<TReplyMarkup>["editMessage"];
+  editMessage: TelegramReplyDeliveryDeps<TReplyMarkup>["editMessage"];
   renderTelegramMessage: (
     text: string,
     options?: { mode?: TelegramRenderMode },
@@ -787,6 +841,7 @@ export interface TelegramRenderedMessageRuntimeDeps<TReplyMarkup> {
   getAssistantRenderingMode?: () => TelegramAssistantRenderingMode;
   sendRichMessage: (
     body: TelegramSendRichMessageBody,
+    options?: Pick<TelegramApiCallOptions, "assertAuthority">,
   ) => Promise<TelegramSentMessage>;
 }
 
@@ -809,6 +864,7 @@ export interface TelegramRenderedMessageRuntime<TReplyMarkup> {
     text: string,
     mode: TelegramRenderMode,
     replyMarkup: TReplyMarkup,
+    options?: TelegramReplyTargetOptions,
   ) => Promise<void>;
   sendInteractiveMessage: (
     chatId: number,
@@ -824,13 +880,15 @@ export interface TelegramRenderedMessageRuntime<TReplyMarkup> {
   ) => Promise<number>;
 }
 
-export interface TelegramRenderedMessageDeliveryRuntime<TReplyMarkup>
-  extends TelegramRenderedMessageRuntime<TReplyMarkup> {
+export interface TelegramRenderedMessageDeliveryRuntime<
+  TReplyMarkup,
+> extends TelegramRenderedMessageRuntime<TReplyMarkup> {
   replyTransport: TelegramReplyTransport<TReplyMarkup>;
 }
 
-export interface TelegramRenderedMessageDeliveryRuntimeDeps<TReplyMarkup>
-  extends TelegramReplyDeliveryDeps<TReplyMarkup> {
+export interface TelegramRenderedMessageDeliveryRuntimeDeps<
+  TReplyMarkup,
+> extends TelegramReplyDeliveryDeps<TReplyMarkup> {
   renderTelegramMessage?: (
     text: string,
     options?: { mode?: TelegramRenderMode },
@@ -838,6 +896,7 @@ export interface TelegramRenderedMessageDeliveryRuntimeDeps<TReplyMarkup>
   getAssistantRenderingMode?: () => TelegramAssistantRenderingMode;
   sendRichMessage: (
     body: TelegramSendRichMessageBody,
+    options?: Pick<TelegramApiCallOptions, "assertAuthority">,
   ) => Promise<TelegramSentMessage>;
 }
 
@@ -875,6 +934,7 @@ export function createTelegramRenderedMessageRuntime<TReplyMarkup>(
           sendRenderedChunks: (chunks, chunkOptions) =>
             deps.replyTransport.sendRenderedChunks(chatId, chunks, {
               target: chunkOptions?.target,
+              assertAuthority: chunkOptions?.assertAuthority,
               replyToMessageId:
                 chunkOptions?.replyToMessageId ?? replyToMessageId,
             }),
@@ -883,6 +943,10 @@ export function createTelegramRenderedMessageRuntime<TReplyMarkup>(
       );
     },
     sendMarkdownReply: async (chatId, replyToMessageId, markdown, options) => {
+      options = {
+        ...options,
+        target: options?.target && { ...options.target },
+      };
       const renderingMode = deps.getAssistantRenderingMode?.() ?? "rich";
       if (renderingMode === "html") {
         return deps.replyTransport.sendRenderedChunks(
@@ -892,6 +956,7 @@ export function createTelegramRenderedMessageRuntime<TReplyMarkup>(
             replyMarkup: options?.replyMarkup,
             target: options?.target,
             replyToMessageId,
+            assertAuthority: options.assertAuthority,
           },
         );
       }
@@ -912,22 +977,29 @@ export function createTelegramRenderedMessageRuntime<TReplyMarkup>(
       text,
       mode,
       replyMarkup,
-      options?: { blocks?: readonly TelegramInputRichBlock[] },
+      options,
     ) => {
-      if (options?.blocks?.length) {
-        await deps.editMessage({
-          chat_id: chatId,
-          message_id: messageId,
-          rich_message: { blocks: [...options.blocks] },
-          reply_markup: replyMarkup,
-        });
+      options = {
+        ...options,
+        target: options?.target && { ...options.target },
+      };
+      if (options.blocks?.length) {
+        await deps.editMessage(
+          {
+            chat_id: chatId,
+            message_id: messageId,
+            rich_message: { blocks: [...options.blocks] },
+            reply_markup: replyMarkup,
+          },
+          { assertAuthority: options.assertAuthority },
+        );
         return;
       }
       await deps.replyTransport.editRenderedMessage(
         chatId,
         messageId,
         deps.renderTelegramMessage(text, { mode }),
-        { replyMarkup },
+        { ...options, replyMarkup },
       );
     },
     sendInteractiveMessage: async (
@@ -937,18 +1009,19 @@ export function createTelegramRenderedMessageRuntime<TReplyMarkup>(
       replyMarkup,
       options,
     ) => {
-      const blocks = (
-        options as { blocks?: readonly TelegramInputRichBlock[] } | undefined
-      )?.blocks;
-      if (blocks?.length) {
+      options = {
+        ...options,
+        target: options?.target && { ...options.target },
+      };
+      if (options.blocks?.length) {
         return sendTelegramNativeRichMessage(
           chatId,
-          { blocks: [...blocks] },
+          { blocks: [...options.blocks] },
           {
             recordOwnership: deps.recordOwnership,
             sendRichMessage: deps.sendRichMessage,
           },
-          options?.target ? { target: options.target } : undefined,
+          options,
         );
       }
       return deps.replyTransport.sendRenderedChunks(
@@ -958,6 +1031,7 @@ export function createTelegramRenderedMessageRuntime<TReplyMarkup>(
           replyMarkup,
           target: options?.target,
           replyToMessageId: options?.replyToMessageId,
+          assertAuthority: options.assertAuthority,
         },
       );
     },
@@ -971,32 +1045,6 @@ export function createTelegramRenderedMessageRuntime<TReplyMarkup>(
         },
         options,
       ),
-  };
-}
-
-// --- Dedup-wrapped Reply Wrappers ---
-
-/** Wrap a sendTextReply with reply dedup so only the first message
- *  in a turn carries reply metadata. */
-export function dedupSendTextReply(
-  dedup: ReplyDedupRuntime,
-  inner: (
-    chatId: number,
-    replyToMessageId: number | undefined,
-    text: string,
-    options?: TelegramTextReplyOptions,
-  ) => Promise<number | undefined>,
-): (
-  chatId: number,
-  replyToMessageId: number,
-  text: string,
-  options?: TelegramTextReplyOptions,
-) => Promise<number | undefined> {
-  return async (chatId, replyToMessageId, text, options) => {
-    const effectiveReplyTo = dedup.shouldReply(replyToMessageId)
-      ? replyToMessageId
-      : undefined;
-    return inner(chatId, effectiveReplyTo, text, options);
   };
 }
 
@@ -1068,6 +1116,10 @@ export const TELEGRAM_GUEST_PLACEHOLDER_FRAMES = [
   "<b>🌏 Working on it...</b>",
 ] as const;
 
+// Telegram does not expose deletion for inline messages. This non-printing,
+// non-empty edit visually clears a guest placeholder after its query is skipped.
+export const TELEGRAM_DISMISSED_GUEST_PLACEHOLDER_TEXT = "\u2063";
+
 export function buildTelegramGuestPlaceholderFrame(step: number): string {
   const frames: readonly string[] = TELEGRAM_GUEST_PLACEHOLDER_FRAMES;
   const index = ((step % frames.length) + frames.length) % frames.length;
@@ -1102,6 +1154,8 @@ export interface TelegramGuestPlaceholderRuntime {
   stop: (inlineMessageId: string) => Promise<void>;
   /** Cancels every loop without waiting for in-flight edits (session shutdown). */
   stopAll: () => void;
+  /** Stops rotation and visually clears the inline placeholder. */
+  dismiss: (inlineMessageId: string) => Promise<void>;
 }
 
 interface TelegramGuestPlaceholderSession {
@@ -1254,6 +1308,19 @@ export function createTelegramGuestPlaceholderRuntime(
         if (session.timer !== undefined) clearTimer(session.timer);
       }
       sessions.clear();
+    },
+    async dismiss(inlineMessageId) {
+      await stop(inlineMessageId);
+      try {
+        await deps.editGuestInlineMessage(inlineMessageId, {
+          text: TELEGRAM_DISMISSED_GUEST_PLACEHOLDER_TEXT,
+          parseMode: "HTML",
+        });
+      } catch (error) {
+        deps.recordRuntimeEvent?.("guest", error, {
+          phase: "guest-placeholder-dismiss",
+        });
+      }
     },
   };
 }

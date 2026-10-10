@@ -15,16 +15,27 @@ import {
   type PathLike,
 } from "node:fs";
 import { dirname } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 
+import {
+  mutateTelegramRuntimeStateSection,
+  readTelegramRuntimeState,
+  renameTelegramPathWithRetry,
+  TelegramRuntimeStateError,
+  withTelegramFileTransaction,
+} from "./locks.ts";
 import {
   getTelegramProcessLiveness,
   type TelegramProcessLiveness,
-} from "./bus.ts";
+} from "./process-identity.ts";
 import {
-  renameTelegramPathWithRetry,
-  withTelegramFileTransaction,
-} from "./locks.ts";
-import type { TelegramTarget } from "./target.ts";
+  areTelegramTargetsEqual as areTargetsEqual,
+  type TelegramTarget,
+} from "./target.ts";
+import {
+  isWireRecord as isRecord,
+  isNonNegativeWireInteger as isSafeTimestamp,
+} from "./wire.ts";
 
 const TELEGRAM_WORKSPACE_ADMISSION_VERSION = 1;
 const TELEGRAM_WORKSPACE_ADMISSION_MAX_LEASES = 4096;
@@ -41,7 +52,7 @@ export type TelegramWorkspaceAdmissionScope =
   | { kind: "chat"; chatId: number }
   | { kind: "profile" };
 
-export interface TelegramWorkspaceAdmissionLease {
+interface TelegramWorkspaceAdmissionLease {
   operationId: string;
   operationKind: string;
   profileKey: string;
@@ -50,15 +61,15 @@ export interface TelegramWorkspaceAdmissionLease {
   acquiredAtMs: number;
 }
 
-export type TelegramWorkspaceDestructiveFenceKind =
-  | "pressure-retirement"
-  | "manual-thread-cleanup"
-  | "journal-writer-closure";
+type TelegramWorkspaceDestructiveFenceKind =
+  "pressure-retirement" | "manual-thread-cleanup" | "journal-writer-closure";
 
 export type TelegramWorkspaceDeletionFenceKind = Exclude<
-  TelegramWorkspaceDestructiveFenceKind, "journal-writer-closure">;
+  TelegramWorkspaceDestructiveFenceKind,
+  "journal-writer-closure"
+>;
 
-export interface TelegramWorkspaceJournalWriterClosureFence {
+interface TelegramWorkspaceJournalWriterClosureFence {
   destructiveKind: "journal-writer-closure";
   phase: "fenced";
   operationId: string;
@@ -73,21 +84,48 @@ export function normalizeTelegramWorkspaceJournalWriterClosureFence(
   value: unknown,
   profileKey: string,
 ): TelegramWorkspaceJournalWriterClosureFence | undefined {
-  if (!isRecord(value) || value.destructiveKind !== "journal-writer-closure" ||
-    value.phase !== "fenced" || !isBoundedText(value.operationId) ||
-    value.profileKey !== profileKey || !isBoundedText(value.recoveryKey) ||
-    !isSafeTimestamp(value.requestedAtMs) || !isSafeTimestamp(value.acquiredAtMs)) return undefined;
+  if (
+    !isRecord(value) ||
+    value.destructiveKind !== "journal-writer-closure" ||
+    value.phase !== "fenced" ||
+    !isBoundedText(value.operationId) ||
+    value.profileKey !== profileKey ||
+    !isBoundedText(value.recoveryKey) ||
+    !isSafeTimestamp(value.requestedAtMs) ||
+    !isSafeTimestamp(value.acquiredAtMs)
+  )
+    return undefined;
   const owner = normalizeOwner(value.owner);
-  if (!owner || Object.keys(value).some(key => ![
-    "destructiveKind", "phase", "operationId", "profileKey", "recoveryKey",
-    "owner", "requestedAtMs", "acquiredAtMs",
-  ].includes(key))) return undefined;
-  return { destructiveKind: "journal-writer-closure", phase: "fenced",
-    operationId: value.operationId, profileKey, recoveryKey: value.recoveryKey,
-    owner, requestedAtMs: value.requestedAtMs, acquiredAtMs: value.acquiredAtMs };
+  if (
+    !owner ||
+    Object.keys(value).some(
+      (key) =>
+        ![
+          "destructiveKind",
+          "phase",
+          "operationId",
+          "profileKey",
+          "recoveryKey",
+          "owner",
+          "requestedAtMs",
+          "acquiredAtMs",
+        ].includes(key),
+    )
+  )
+    return undefined;
+  return {
+    destructiveKind: "journal-writer-closure",
+    phase: "fenced",
+    operationId: value.operationId,
+    profileKey,
+    recoveryKey: value.recoveryKey,
+    owner,
+    requestedAtMs: value.requestedAtMs,
+    acquiredAtMs: value.acquiredAtMs,
+  };
 }
 
-export interface TelegramWorkspaceJournalWriterProtocolMode {
+interface TelegramWorkspaceJournalWriterProtocolMode {
   version: 1;
   protocol: "custody-v3";
   profileKey: string;
@@ -104,21 +142,43 @@ export function normalizeTelegramWorkspaceJournalWriterProtocolMode(
   profileKey: string,
 ): TelegramWorkspaceJournalWriterProtocolMode | undefined {
   if (!isRecord(value)) return undefined;
-  const keys = ["version", "protocol", "profileKey", "recoveryKey", "startupAuthorityId",
-    "closureOperationId", "writerInventorySha256", "installedBy", "installedAtMs"];
+  const keys = [
+    "version",
+    "protocol",
+    "profileKey",
+    "recoveryKey",
+    "startupAuthorityId",
+    "closureOperationId",
+    "writerInventorySha256",
+    "installedBy",
+    "installedAtMs",
+  ];
   const installedBy = normalizeOwner(value.installedBy);
-  if (Object.keys(value).some(key => !keys.includes(key)) || value.version !== 1 ||
-    value.protocol !== "custody-v3" || value.profileKey !== profileKey ||
-    !isBoundedText(value.recoveryKey) || !isBoundedText(value.startupAuthorityId) ||
+  if (
+    Object.keys(value).some((key) => !keys.includes(key)) ||
+    value.version !== 1 ||
+    value.protocol !== "custody-v3" ||
+    value.profileKey !== profileKey ||
+    !isBoundedText(value.recoveryKey) ||
+    !isBoundedText(value.startupAuthorityId) ||
     !isBoundedText(value.closureOperationId) ||
     typeof value.writerInventorySha256 !== "string" ||
-    !/^[a-f0-9]{64}$/u.test(value.writerInventorySha256) || !installedBy ||
-    !isSafeTimestamp(value.installedAtMs)) return undefined;
-  return { version: 1, protocol: "custody-v3", profileKey,
-    recoveryKey: value.recoveryKey, startupAuthorityId: value.startupAuthorityId,
+    !/^[a-f0-9]{64}$/u.test(value.writerInventorySha256) ||
+    !installedBy ||
+    !isSafeTimestamp(value.installedAtMs)
+  )
+    return undefined;
+  return {
+    version: 1,
+    protocol: "custody-v3",
+    profileKey,
+    recoveryKey: value.recoveryKey,
+    startupAuthorityId: value.startupAuthorityId,
     closureOperationId: value.closureOperationId,
     writerInventorySha256: value.writerInventorySha256,
-    installedBy, installedAtMs: value.installedAtMs };
+    installedBy,
+    installedAtMs: value.installedAtMs,
+  };
 }
 
 interface TelegramWorkspaceRetirementFenceBase {
@@ -142,14 +202,19 @@ export type TelegramWorkspaceRetirementFence =
       deletionIssuedAtMs: number;
     })
   | (TelegramWorkspaceRetirementFenceBase & {
+      destructiveKind?: "pressure-retirement";
+      phase: "deletion-rejected";
+      deletionIssuedAtMs: number;
+      rejectionConfirmedAtMs: number;
+    })
+  | (TelegramWorkspaceRetirementFenceBase & {
       phase: "commit-ready";
       absenceConfirmedAtMs: number;
       deletionIssuedAtMs?: number;
     });
 
 export type TelegramWorkspaceDestructiveFence =
-  | TelegramWorkspaceRetirementFence
-  | TelegramWorkspaceJournalWriterClosureFence;
+  TelegramWorkspaceRetirementFence | TelegramWorkspaceJournalWriterClosureFence;
 
 export function isTelegramWorkspaceRetirementFence(
   fence: TelegramWorkspaceDestructiveFence,
@@ -177,16 +242,15 @@ interface TelegramWorkspaceAdmissionState {
   writerProtocolMode?: TelegramWorkspaceJournalWriterProtocolMode;
 }
 
-export type TelegramWorkspaceAdmissionBlockReason =
-  | "retirement-fenced"
-  | "admission-active"
-  | "retirement-active";
-
-export type TelegramWorkspaceAdmissionAcquireResult =
-  | { kind: "acquired"; lease: TelegramWorkspaceAdmissionLease; resumed: boolean }
+type TelegramWorkspaceAdmissionAcquireResult =
+  | {
+      kind: "acquired";
+      lease: TelegramWorkspaceAdmissionLease;
+      resumed: boolean;
+    }
   | { kind: "blocked"; reason: "retirement-fenced" };
 
-export type TelegramWorkspaceRetirementFenceAcquireResult =
+type TelegramWorkspaceRetirementFenceAcquireResult =
   | {
       kind: "acquired";
       fence: TelegramWorkspaceRetirementFence;
@@ -197,16 +261,20 @@ export type TelegramWorkspaceRetirementFenceAcquireResult =
       reason: "admission-active" | "retirement-active";
     };
 
-export type TelegramWorkspaceJournalWriterProtocolInstallResult = {
+type TelegramWorkspaceJournalWriterProtocolInstallResult = {
   mode: TelegramWorkspaceJournalWriterProtocolMode;
   resumed: boolean;
 };
 
-export type TelegramWorkspaceJournalWriterClosureAcquireResult =
-  | { kind: "acquired"; fence: TelegramWorkspaceJournalWriterClosureFence; resumed: boolean }
+type TelegramWorkspaceJournalWriterClosureAcquireResult =
+  | {
+      kind: "acquired";
+      fence: TelegramWorkspaceJournalWriterClosureFence;
+      resumed: boolean;
+    }
   | { kind: "blocked"; reason: "admission-active" | "retirement-active" };
 
-export type TelegramWorkspaceDeletionPermitResult =
+type TelegramWorkspaceDeletionPermitResult =
   | {
       kind: "issued";
       fence: TelegramWorkspaceRetirementFence;
@@ -214,19 +282,20 @@ export type TelegramWorkspaceDeletionPermitResult =
     }
   | { kind: "already-issued"; fence: TelegramWorkspaceRetirementFence };
 
-export interface TelegramWorkspaceAdmissionLedgerSnapshot {
+interface TelegramWorkspaceAdmissionLedgerSnapshot {
   profileKey: string;
   leases: TelegramWorkspaceAdmissionLease[];
   fence?: TelegramWorkspaceDestructiveFence;
   writerProtocolMode?: TelegramWorkspaceJournalWriterProtocolMode;
 }
 
-export type TelegramWorkspaceAdmissionPublicationBoundary =
-  | "before-write"
-  | "after-write-before-rename";
+type TelegramWorkspaceAdmissionPublicationBoundary =
+  "before-write" | "after-write-before-rename";
 
-export interface TelegramWorkspaceAdmissionLedgerOptions {
+interface TelegramWorkspaceAdmissionLedgerOptions {
   path: string;
+  /** Explicit logical section identity for the consolidated root; absent means the standalone ledger adapter. */
+  stateProfile?: string;
   profileKey: string;
   owner: TelegramWorkspaceAdmissionOwner;
   getNowMs?: () => number;
@@ -275,15 +344,25 @@ export interface TelegramWorkspaceAdmissionLedger {
     scope: TelegramWorkspaceAdmissionScope;
   }) => TelegramWorkspaceAdmissionAcquireResult;
   releaseAdmission: (expected: TelegramWorkspaceAdmissionLease) => boolean;
-  acquireJournalWriterClosure: (input: { operationId: string; recoveryKey: string;
-    requestedAtMs: number }) => TelegramWorkspaceJournalWriterClosureAcquireResult;
-  releaseJournalWriterClosure: (expected: TelegramWorkspaceJournalWriterClosureFence) => boolean;
-  installJournalWriterProtocolMode: (expected: TelegramWorkspaceJournalWriterClosureFence,
-    input: { startupAuthorityId: string; writerInventorySha256: string }) =>
-      TelegramWorkspaceJournalWriterProtocolInstallResult;
-  acquireJournalWriterAdmission: (input: { operationId: string; recoveryKey: string;
-    startupAuthorityId: string; closureOperationId: string; writerInventorySha256: string }) =>
-      TelegramWorkspaceAdmissionAcquireResult;
+  acquireJournalWriterClosure: (input: {
+    operationId: string;
+    recoveryKey: string;
+    requestedAtMs: number;
+  }) => TelegramWorkspaceJournalWriterClosureAcquireResult;
+  releaseJournalWriterClosure: (
+    expected: TelegramWorkspaceJournalWriterClosureFence,
+  ) => boolean;
+  installJournalWriterProtocolMode: (
+    expected: TelegramWorkspaceJournalWriterClosureFence,
+    input: { startupAuthorityId: string; writerInventorySha256: string },
+  ) => TelegramWorkspaceJournalWriterProtocolInstallResult;
+  acquireJournalWriterAdmission: (input: {
+    operationId: string;
+    recoveryKey: string;
+    startupAuthorityId: string;
+    closureOperationId: string;
+    writerInventorySha256: string;
+  }) => TelegramWorkspaceAdmissionAcquireResult;
   acquireRetirementFence: (input: {
     operationId: string;
     retirementIntentId: string;
@@ -318,6 +397,14 @@ export interface TelegramWorkspaceAdmissionLedger {
     expected: TelegramWorkspaceRetirementFence,
   ) => TelegramWorkspaceRetirementFence;
   confirmThreadCleanupAbsence: TelegramWorkspaceAdmissionLedger["confirmRetirementAbsence"];
+  /** Caller must have exact transport proof of rejection, never merely target presence. */
+  confirmRetirementRejection: (
+    expected: TelegramWorkspaceRetirementFence,
+  ) => TelegramWorkspaceRetirementFence;
+  /** Caller must first durably withdraw the exact rejected intent, retaining its binding. */
+  completeRejectedRetirementFence: (
+    expected: TelegramWorkspaceRetirementFence,
+  ) => boolean;
   releaseUnissuedRetirementFence: (
     expected: TelegramWorkspaceRetirementFence,
   ) => boolean;
@@ -340,14 +427,6 @@ function invalidState(message: string, cause?: unknown): never {
 
 function authorityChanged(message: string): never {
   throw new TelegramWorkspaceAdmissionError("authority-changed", message);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
-
-function isSafeTimestamp(value: unknown): value is number {
-  return Number.isSafeInteger(value) && (value as number) >= 0;
 }
 
 function isBoundedText(value: unknown): value is string {
@@ -404,7 +483,8 @@ function normalizeScope(
   if (!isRecord(value)) return undefined;
   if (value.kind === "profile") return { kind: "profile" };
   if (value.kind === "chat") {
-    if (!Number.isSafeInteger(value.chatId) || value.chatId === 0) return undefined;
+    if (!Number.isSafeInteger(value.chatId) || value.chatId === 0)
+      return undefined;
     return { kind: "chat", chatId: value.chatId as number };
   }
   if (value.kind === "target") {
@@ -447,7 +527,10 @@ function normalizeFence(
 ): TelegramWorkspaceDestructiveFence | undefined {
   if (!isRecord(value)) return undefined;
   if (value.destructiveKind === "journal-writer-closure")
-    return normalizeTelegramWorkspaceJournalWriterClosureFence(value, profileKey);
+    return normalizeTelegramWorkspaceJournalWriterClosureFence(
+      value,
+      profileKey,
+    );
   const target = normalizeTarget(value.target);
   const owner = normalizeOwner(value.owner);
   if (
@@ -465,10 +548,16 @@ function normalizeFence(
   ) {
     return undefined;
   }
-  if (value.destructiveKind !== undefined && value.destructiveKind !== "pressure-retirement" &&
-      value.destructiveKind !== "manual-thread-cleanup") return undefined;
+  if (
+    value.destructiveKind !== undefined &&
+    value.destructiveKind !== "pressure-retirement" &&
+    value.destructiveKind !== "manual-thread-cleanup"
+  )
+    return undefined;
   const base: TelegramWorkspaceRetirementFenceBase = {
-    ...(value.destructiveKind === undefined ? {} : { destructiveKind: value.destructiveKind }),
+    ...(value.destructiveKind === undefined
+      ? {}
+      : { destructiveKind: value.destructiveKind }),
     operationId: value.operationId,
     retirementIntentId: value.retirementIntentId,
     profileKey,
@@ -489,6 +578,24 @@ function normalizeFence(
       ...base,
       phase: "deletion-issued",
       deletionIssuedAtMs: value.deletionIssuedAtMs,
+    };
+  }
+  if (
+    value.phase === "deletion-rejected" &&
+    (value.destructiveKind === undefined ||
+      value.destructiveKind === "pressure-retirement") &&
+    isSafeTimestamp(value.deletionIssuedAtMs) &&
+    isSafeTimestamp(value.rejectionConfirmedAtMs)
+  ) {
+    const { destructiveKind: _kind, ...pressureBase } = base;
+    return {
+      ...pressureBase,
+      ...(value.destructiveKind === "pressure-retirement"
+        ? { destructiveKind: "pressure-retirement" as const }
+        : {}),
+      phase: "deletion-rejected",
+      deletionIssuedAtMs: value.deletionIssuedAtMs,
+      rejectionConfirmedAtMs: value.rejectionConfirmedAtMs,
     };
   }
   if (
@@ -520,18 +627,28 @@ function cloneScope(
 function cloneLease(
   lease: TelegramWorkspaceAdmissionLease,
 ): TelegramWorkspaceAdmissionLease {
-  return { ...lease, scope: cloneScope(lease.scope), owner: { ...lease.owner } };
+  return {
+    ...lease,
+    scope: cloneScope(lease.scope),
+    owner: { ...lease.owner },
+  };
 }
 
-export function resolveTelegramWorkspaceDestructiveFenceKind(
-  fence: { destructiveKind?: TelegramWorkspaceDestructiveFenceKind },
-): TelegramWorkspaceDestructiveFenceKind {
+export function resolveTelegramWorkspaceDestructiveFenceKind(fence: {
+  destructiveKind?: TelegramWorkspaceDestructiveFenceKind;
+}): TelegramWorkspaceDestructiveFenceKind {
   return fence.destructiveKind ?? "pressure-retirement";
 }
 
-function cloneFence(fence: TelegramWorkspaceRetirementFence): TelegramWorkspaceRetirementFence;
-function cloneFence(fence: TelegramWorkspaceJournalWriterClosureFence): TelegramWorkspaceJournalWriterClosureFence;
-function cloneFence(fence: TelegramWorkspaceDestructiveFence): TelegramWorkspaceDestructiveFence;
+function cloneFence(
+  fence: TelegramWorkspaceRetirementFence,
+): TelegramWorkspaceRetirementFence;
+function cloneFence(
+  fence: TelegramWorkspaceJournalWriterClosureFence,
+): TelegramWorkspaceJournalWriterClosureFence;
+function cloneFence(
+  fence: TelegramWorkspaceDestructiveFence,
+): TelegramWorkspaceDestructiveFence;
 function cloneFence(
   fence: TelegramWorkspaceDestructiveFence,
 ): TelegramWorkspaceDestructiveFence {
@@ -567,9 +684,72 @@ function readState(
   } catch (error) {
     invalidState("Telegram Workspace admission state is malformed.", error);
   }
-  if (!isRecord(parsed)) {
-    invalidState("Telegram Workspace admission state is invalid.");
+  return normalizeAdmissionState(parsed, profileKey);
+}
+
+function isConsolidatedAdmissionKey(value: unknown, profile: string): boolean {
+  if (!isBoundedText(value)) return false;
+  try {
+    const key: unknown = JSON.parse(value);
+    return (
+      isRecord(key) &&
+      Object.keys(key).length === 3 &&
+      key.version === TELEGRAM_WORKSPACE_ADMISSION_VERSION &&
+      key.profile === profile &&
+      isRecord(key.bot) &&
+      Object.keys(key.bot).length === 1 &&
+      typeof key.bot.tokenSha256 === "string" &&
+      /^[a-f0-9]{64}$/u.test(key.bot.tokenSha256)
+    );
+  } catch {
+    return false;
   }
+}
+/** Pure damage check for one consolidated admission section under its own stored profile key; throws when invalid. */
+export function assertTelegramConsolidatedAdmissionSection(
+  value: unknown,
+  stateProfile: string,
+): void {
+  if (value === undefined) return;
+  normalizeAdmissionState(
+    value,
+    isRecord(value) && typeof value.profileKey === "string"
+      ? value.profileKey
+      : "",
+    stateProfile,
+  );
+}
+
+function normalizeAdmissionState(
+  parsed: unknown,
+  profileKey: string,
+  stateProfile?: string,
+): TelegramWorkspaceAdmissionState {
+  if (parsed === undefined)
+    return {
+      version: TELEGRAM_WORKSPACE_ADMISSION_VERSION,
+      profileKey,
+      leases: [],
+    };
+  if (!isRecord(parsed))
+    invalidState("Telegram Workspace admission state is invalid.");
+  if (
+    stateProfile !== undefined &&
+    (Object.keys(parsed).some(
+      (key) =>
+        ![
+          "version",
+          "profileKey",
+          "leases",
+          "fence",
+          "writerProtocolMode",
+        ].includes(key),
+    ) ||
+      !isConsolidatedAdmissionKey(parsed.profileKey, stateProfile))
+  )
+    invalidState(
+      "Telegram consolidated admission section identity is invalid.",
+    );
   if (
     parsed.version !== TELEGRAM_WORKSPACE_ADMISSION_VERSION ||
     !Array.isArray(parsed.leases) ||
@@ -578,8 +758,11 @@ function readState(
     invalidState("Telegram Workspace admission state authority is invalid.");
   }
   if (parsed.profileKey !== profileKey) {
-    if (parsed.leases.length === 0 && parsed.fence === undefined &&
-        parsed.writerProtocolMode === undefined) {
+    if (
+      parsed.leases.length === 0 &&
+      parsed.fence === undefined &&
+      parsed.writerProtocolMode === undefined
+    ) {
       return {
         version: TELEGRAM_WORKSPACE_ADMISSION_VERSION,
         profileKey,
@@ -588,25 +771,48 @@ function readState(
     }
     invalidState("Telegram Workspace admission profile authority changed.");
   }
-  const leases = parsed.leases.map((value) => normalizeLease(value, profileKey));
+  const leases = parsed.leases.map((value) =>
+    normalizeLease(value, profileKey),
+  );
   if (leases.some((lease) => lease === undefined)) {
     invalidState("Telegram Workspace admission lease is invalid.");
   }
   const normalizedLeases = leases as TelegramWorkspaceAdmissionLease[];
-  if (new Set(normalizedLeases.map((lease) => lease.operationId)).size !== normalizedLeases.length) {
+  if (
+    new Set(normalizedLeases.map((lease) => lease.operationId)).size !==
+    normalizedLeases.length
+  ) {
     invalidState("Telegram Workspace admission lease identity is duplicated.");
   }
   const fence =
-    parsed.fence === undefined ? undefined : normalizeFence(parsed.fence, profileKey);
+    parsed.fence === undefined
+      ? undefined
+      : normalizeFence(parsed.fence, profileKey);
   if (parsed.fence !== undefined && !fence) {
     invalidState("Telegram Workspace retirement fence is invalid.");
   }
-  const writerProtocolMode = parsed.writerProtocolMode === undefined ? undefined :
-    normalizeTelegramWorkspaceJournalWriterProtocolMode(parsed.writerProtocolMode, profileKey);
+  const writerProtocolMode =
+    parsed.writerProtocolMode === undefined
+      ? undefined
+      : normalizeTelegramWorkspaceJournalWriterProtocolMode(
+          parsed.writerProtocolMode,
+          profileKey,
+        );
   if (parsed.writerProtocolMode !== undefined && !writerProtocolMode)
     invalidState("Telegram Workspace writer protocol mode is invalid.");
   if (fence && writerProtocolMode)
-    invalidState("Telegram Workspace destructive fence conflicts with writer protocol mode.");
+    invalidState(
+      "Telegram Workspace destructive fence conflicts with writer protocol mode.",
+    );
+  if (
+    stateProfile !== undefined &&
+    (!isDeepStrictEqual(parsed.leases, normalizedLeases) ||
+      !isDeepStrictEqual(parsed.fence, fence) ||
+      !isDeepStrictEqual(parsed.writerProtocolMode, writerProtocolMode))
+  )
+    invalidState(
+      "Telegram consolidated admission evidence cannot drop unknown fields.",
+    );
   return {
     version: TELEGRAM_WORKSPACE_ADMISSION_VERSION,
     profileKey,
@@ -640,7 +846,9 @@ function writeState(
           ...(options.publishRename ? { rename: options.publishRename } : {}),
         })
       ) {
-        throw new Error("Temporary admission state disappeared before publication.");
+        throw new Error(
+          "Temporary admission state disappeared before publication.",
+        );
       }
       chmodSync(path, 0o600);
     } catch (error) {
@@ -657,13 +865,6 @@ function writeState(
       // A successful atomic rename consumes the temporary path.
     }
   }
-}
-
-function areTargetsEqual(
-  left: TelegramTarget & { threadId: number },
-  right: TelegramTarget & { threadId: number },
-): boolean {
-  return left.chatId === right.chatId && left.threadId === right.threadId;
 }
 
 function scopesConflict(
@@ -739,34 +940,50 @@ function areWriterProtocolModesEqual(
   left: TelegramWorkspaceJournalWriterProtocolMode,
   right: TelegramWorkspaceJournalWriterProtocolMode,
 ): boolean {
-  return left.protocol === right.protocol && left.profileKey === right.profileKey &&
+  return (
+    left.protocol === right.protocol &&
+    left.profileKey === right.profileKey &&
     left.recoveryKey === right.recoveryKey &&
     left.startupAuthorityId === right.startupAuthorityId &&
     left.closureOperationId === right.closureOperationId &&
     left.writerInventorySha256 === right.writerInventorySha256 &&
-    areOwnersEqual(left.installedBy, right.installedBy) && left.installedAtMs === right.installedAtMs;
+    areOwnersEqual(left.installedBy, right.installedBy) &&
+    left.installedAtMs === right.installedAtMs
+  );
 }
 
 function areWriterClosureFencesEqual(
   left: TelegramWorkspaceJournalWriterClosureFence,
   right: TelegramWorkspaceJournalWriterClosureFence,
 ): boolean {
-  return left.operationId === right.operationId && left.profileKey === right.profileKey &&
-    left.recoveryKey === right.recoveryKey && areOwnersEqual(left.owner, right.owner) &&
-    left.requestedAtMs === right.requestedAtMs && left.acquiredAtMs === right.acquiredAtMs;
+  return (
+    left.operationId === right.operationId &&
+    left.profileKey === right.profileKey &&
+    left.recoveryKey === right.recoveryKey &&
+    areOwnersEqual(left.owner, right.owner) &&
+    left.requestedAtMs === right.requestedAtMs &&
+    left.acquiredAtMs === right.acquiredAtMs
+  );
 }
 
 function areFencesEqual(
   left: TelegramWorkspaceRetirementFence,
   right: TelegramWorkspaceRetirementFence,
 ): boolean {
-  if (!areFenceBasesEqual(left, right) || left.phase !== right.phase) return false;
+  if (!areFenceBasesEqual(left, right) || left.phase !== right.phase)
+    return false;
   if (left.phase === "fenced" && right.phase === "fenced") return true;
-  if (
-    left.phase === "deletion-issued" &&
-    right.phase === "deletion-issued"
-  ) {
+  if (left.phase === "deletion-issued" && right.phase === "deletion-issued") {
     return left.deletionIssuedAtMs === right.deletionIssuedAtMs;
+  }
+  if (
+    left.phase === "deletion-rejected" &&
+    right.phase === "deletion-rejected"
+  ) {
+    return (
+      left.deletionIssuedAtMs === right.deletionIssuedAtMs &&
+      left.rejectionConfirmedAtMs === right.rejectionConfirmedAtMs
+    );
   }
   return (
     left.phase === "commit-ready" &&
@@ -776,7 +993,9 @@ function areFencesEqual(
   );
 }
 
-function validateOptions(options: TelegramWorkspaceAdmissionLedgerOptions): void {
+function validateOptions(
+  options: TelegramWorkspaceAdmissionLedgerOptions,
+): void {
   if (!isBoundedText(options.path)) {
     invalidInput("Telegram Workspace admission path is required.");
   }
@@ -786,6 +1005,14 @@ function validateOptions(options: TelegramWorkspaceAdmissionLedgerOptions): void
   if (!normalizeOwner(options.owner)) {
     invalidInput("Telegram Workspace admission owner is invalid.");
   }
+  if (
+    options.stateProfile !== undefined &&
+    (!isBoundedText(options.stateProfile) ||
+      !isConsolidatedAdmissionKey(options.profileKey, options.stateProfile))
+  )
+    invalidInput(
+      "Telegram consolidated admission requires an exact bot/profile section identity.",
+    );
 }
 
 function validateOperationId(operationId: string): void {
@@ -828,7 +1055,9 @@ export function createTelegramWorkspaceAdmissionProfileKey(input: {
 }): string {
   const profileName = (input.profileName ?? "default").trim();
   if (!isBoundedText(profileName) || !isBoundedText(input.botToken)) {
-    invalidInput("Telegram Workspace admission bot/profile identity is invalid.");
+    invalidInput(
+      "Telegram Workspace admission bot/profile identity is invalid.",
+    );
   }
   return JSON.stringify({
     version: TELEGRAM_WORKSPACE_ADMISSION_VERSION,
@@ -839,31 +1068,43 @@ export function createTelegramWorkspaceAdmissionProfileKey(input: {
   });
 }
 
-export interface TelegramWorkspaceAdmissionRuntimeBinding {
+interface TelegramWorkspaceAdmissionRuntimeBinding {
   resolve: () => TelegramWorkspaceAdmissionLedger | undefined;
 }
 
-export function createTelegramWorkspaceAdmissionRuntimeBinding(input: {
-  getProfileName: () => string | undefined;
-  getBotToken: () => string | undefined;
-  getPath: (profileName?: string) => string;
-  owner: TelegramWorkspaceAdmissionOwner;
-  getNowMs?: () => number;
-  getProcessLiveness?: (
-    owner: TelegramWorkspaceAdmissionOwner,
-  ) => TelegramProcessLiveness;
-}): TelegramWorkspaceAdmissionRuntimeBinding {
+export function createTelegramWorkspaceAdmissionRuntimeBinding(
+  input: {
+    getProfileName: () => string | undefined;
+    getBotToken: () => string | undefined;
+    owner: TelegramWorkspaceAdmissionOwner;
+    getNowMs?: () => number;
+    getProcessLiveness?: (
+      owner: TelegramWorkspaceAdmissionOwner,
+    ) => TelegramProcessLiveness;
+  } & (
+    | { getPath: (profileName?: string) => string; getStatePath?: never }
+    | { getStatePath: () => string; getPath?: never }
+  ),
+): TelegramWorkspaceAdmissionRuntimeBinding {
+  const { getProfileName, getBotToken, getPath, getStatePath } = input;
+  if ((getPath === undefined) === (getStatePath === undefined))
+    invalidInput(
+      "Telegram admission binding must select one storage identity.",
+    );
   return {
     resolve() {
-      const botToken = input.getBotToken();
+      const botToken = getBotToken();
       if (!botToken) return undefined;
-      const configuredProfileName = input.getProfileName();
+      const configuredProfileName = getProfileName();
       const profileKey = createTelegramWorkspaceAdmissionProfileKey({
         profileName: configuredProfileName ?? "default",
         botToken,
       });
       return createTelegramWorkspaceAdmissionLedger({
-        path: input.getPath(configuredProfileName),
+        path: getStatePath ? getStatePath() : getPath!(configuredProfileName),
+        ...(getStatePath
+          ? { stateProfile: configuredProfileName ?? "default" }
+          : {}),
         profileKey,
         owner: input.owner,
         getNowMs: input.getNowMs,
@@ -873,7 +1114,10 @@ export function createTelegramWorkspaceAdmissionRuntimeBinding(input: {
   };
 }
 
-function getAdmissionScopeKey(scope: TelegramWorkspaceAdmissionScope): string {
+/** Stable admission-scope identity used by leases and admission-gated journal operations. */
+export function getTelegramWorkspaceAdmissionScopeKey(
+  scope: TelegramWorkspaceAdmissionScope,
+): string {
   if (scope.kind === "profile") return "profile";
   if (scope.kind === "chat") return `chat:${scope.chatId}`;
   return `target:${scope.target.chatId}:${scope.target.threadId}`;
@@ -891,6 +1135,60 @@ function reserveTelegramWorkspaceAdmissionOperationId(
   };
 }
 
+/** Validated, de-duplicated scopes in the stable key order every admitted operation acquires. */
+function normalizeTelegramWorkspaceAdmittedScopes(input: {
+  operationId: string;
+  operationKind: string;
+  scopes: readonly TelegramWorkspaceAdmissionScope[];
+}): TelegramWorkspaceAdmissionScope[] {
+  validateOperationId(input.operationId);
+  if (!isBoundedText(input.operationKind) || input.scopes.length === 0) {
+    invalidInput("Telegram Workspace admitted operation is invalid.");
+  }
+  const uniqueScopes = new Map<string, TelegramWorkspaceAdmissionScope>();
+  for (const scope of input.scopes) {
+    validateScope(scope);
+    uniqueScopes.set(
+      getTelegramWorkspaceAdmissionScopeKey(scope),
+      cloneScope(scope),
+    );
+  }
+  return Array.from(uniqueScopes.entries())
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([, scope]) => scope);
+}
+
+/** Appends each lease as it is acquired so a blocked or failed scope leaves earlier leases releasable. */
+function acquireTelegramWorkspaceAdmittedScopes(
+  input: {
+    ledger: Pick<TelegramWorkspaceAdmissionLedger, "acquireAdmission">;
+    operationId: string;
+    operationKind: string;
+  },
+  scopes: readonly TelegramWorkspaceAdmissionScope[],
+  acquired: TelegramWorkspaceAdmissionLease[],
+): void {
+  for (const scope of scopes) {
+    const scopeOperationId = `admission:${createHash("sha256")
+      .update(input.operationId)
+      .update("\0")
+      .update(getTelegramWorkspaceAdmissionScopeKey(scope))
+      .digest("hex")}`;
+    const result = input.ledger.acquireAdmission({
+      operationId: scopeOperationId,
+      operationKind: input.operationKind,
+      scope,
+    });
+    if (result.kind === "blocked") {
+      throw new TelegramWorkspaceAdmissionError(
+        "admission-blocked",
+        "Telegram Workspace operation is blocked by retirement.",
+      );
+    }
+    acquired.push(result.lease);
+  }
+}
+
 export function runWithTelegramWorkspaceAdmissions<T>(input: {
   ledger: Pick<
     TelegramWorkspaceAdmissionLedger,
@@ -901,42 +1199,14 @@ export function runWithTelegramWorkspaceAdmissions<T>(input: {
   scopes: readonly TelegramWorkspaceAdmissionScope[];
   operation: () => T;
 }): T {
-  validateOperationId(input.operationId);
-  if (!isBoundedText(input.operationKind) || input.scopes.length === 0) {
-    invalidInput("Telegram Workspace admitted operation is invalid.");
-  }
-  const uniqueScopes = new Map<string, TelegramWorkspaceAdmissionScope>();
-  for (const scope of input.scopes) {
-    validateScope(scope);
-    uniqueScopes.set(getAdmissionScopeKey(scope), cloneScope(scope));
-  }
-  const scopes = Array.from(uniqueScopes.entries())
-    .sort(([left], [right]) => left.localeCompare(right))
-    .map(([, scope]) => scope);
-  const releaseActiveOperation =
-    reserveTelegramWorkspaceAdmissionOperationId(input.operationId);
+  const scopes = normalizeTelegramWorkspaceAdmittedScopes(input);
+  const releaseActiveOperation = reserveTelegramWorkspaceAdmissionOperationId(
+    input.operationId,
+  );
   const acquired: TelegramWorkspaceAdmissionLease[] = [];
   let outcome: { ok: true; value: T } | { ok: false; error: unknown };
   try {
-    for (const scope of scopes) {
-      const scopeOperationId = `admission:${createHash("sha256")
-        .update(input.operationId)
-        .update("\0")
-        .update(getAdmissionScopeKey(scope))
-        .digest("hex")}`;
-      const result = input.ledger.acquireAdmission({
-        operationId: scopeOperationId,
-        operationKind: input.operationKind,
-        scope,
-      });
-      if (result.kind === "blocked") {
-        throw new TelegramWorkspaceAdmissionError(
-          "admission-blocked",
-          "Telegram Workspace operation is blocked by retirement.",
-        );
-      }
-      acquired.push(result.lease);
-    }
+    acquireTelegramWorkspaceAdmittedScopes(input, scopes, acquired);
     outcome = { ok: true, value: input.operation() };
   } catch (error) {
     outcome = { ok: false, error };
@@ -961,28 +1231,47 @@ export function runWithTelegramWorkspaceAdmissions<T>(input: {
 }
 
 export function createTelegramWorkspaceJournalWriterAdmission(input: {
-  ledger: Pick<TelegramWorkspaceAdmissionLedger,
-    "acquireAdmission" | "acquireJournalWriterAdmission" | "releaseAdmission">;
-  protocolAuthority?: Omit<Parameters<TelegramWorkspaceAdmissionLedger["acquireJournalWriterAdmission"]>[0],
-    "operationId">;
+  ledger: Pick<
+    TelegramWorkspaceAdmissionLedger,
+    "acquireAdmission" | "acquireJournalWriterAdmission" | "releaseAdmission"
+  >;
+  protocolAuthority?: Omit<
+    Parameters<
+      TelegramWorkspaceAdmissionLedger["acquireJournalWriterAdmission"]
+    >[0],
+    "operationId"
+  >;
   createOperationId?: () => string;
   onReleaseError?: (error: unknown) => void;
 }): <T>(operation: () => T) => T {
   let pendingOperationId: string | undefined;
   let active = false;
   return <T>(operation: () => T): T => {
-    if (active) invalidState("Telegram Workspace journal writer admission is already active.");
-    const operationId = pendingOperationId ?? input.createOperationId?.() ??
+    if (active)
+      invalidState(
+        "Telegram Workspace journal writer admission is already active.",
+      );
+    const operationId =
+      pendingOperationId ??
+      input.createOperationId?.() ??
       `journal-writer:${randomUUID()}`;
     validateOperationId(operationId);
     pendingOperationId = operationId;
     const result = input.protocolAuthority
-      ? input.ledger.acquireJournalWriterAdmission({ operationId, ...input.protocolAuthority })
-      : input.ledger.acquireAdmission({ operationId,
-          operationKind: "journal-write", scope: { kind: "profile" } });
+      ? input.ledger.acquireJournalWriterAdmission({
+          operationId,
+          ...input.protocolAuthority,
+        })
+      : input.ledger.acquireAdmission({
+          operationId,
+          operationKind: "journal-write",
+          scope: { kind: "profile" },
+        });
     if (result.kind === "blocked") {
-      throw new TelegramWorkspaceAdmissionError("admission-blocked",
-        "Telegram Workspace journal writer is blocked by destructive closure.");
+      throw new TelegramWorkspaceAdmissionError(
+        "admission-blocked",
+        "Telegram Workspace journal writer is blocked by destructive closure.",
+      );
     }
     pendingOperationId = undefined;
     active = true;
@@ -992,9 +1281,15 @@ export function createTelegramWorkspaceJournalWriterAdmission(input: {
       active = false;
       try {
         if (!input.ledger.releaseAdmission(result.lease))
-          authorityChanged("Telegram Workspace journal writer lease disappeared before release.");
+          authorityChanged(
+            "Telegram Workspace journal writer lease disappeared before release.",
+          );
       } catch (error) {
-        try { input.onReleaseError?.(error); } catch { /* Diagnostics cannot change the journal outcome. */ }
+        try {
+          input.onReleaseError?.(error);
+        } catch {
+          /* Diagnostics cannot change the journal outcome. */
+        }
       }
     }
   };
@@ -1011,20 +1306,10 @@ export async function runWithTelegramWorkspaceAdmissionsAsync<T>(input: {
   operation: () => Promise<T>;
   onReleaseError?: (error: unknown) => void;
 }): Promise<T> {
-  validateOperationId(input.operationId);
-  if (!isBoundedText(input.operationKind) || input.scopes.length === 0) {
-    invalidInput("Telegram Workspace admitted operation is invalid.");
-  }
-  const uniqueScopes = new Map<string, TelegramWorkspaceAdmissionScope>();
-  for (const scope of input.scopes) {
-    validateScope(scope);
-    uniqueScopes.set(getAdmissionScopeKey(scope), cloneScope(scope));
-  }
-  const scopes = Array.from(uniqueScopes.entries())
-    .sort(([left], [right]) => left.localeCompare(right))
-    .map(([, scope]) => scope);
-  const releaseActiveOperation =
-    reserveTelegramWorkspaceAdmissionOperationId(input.operationId);
+  const scopes = normalizeTelegramWorkspaceAdmittedScopes(input);
+  const releaseActiveOperation = reserveTelegramWorkspaceAdmissionOperationId(
+    input.operationId,
+  );
   const acquired: TelegramWorkspaceAdmissionLease[] = [];
   const releaseAll = (): void => {
     for (const lease of acquired.reverse()) {
@@ -1045,25 +1330,7 @@ export async function runWithTelegramWorkspaceAdmissionsAsync<T>(input: {
     }
   };
   try {
-    for (const scope of scopes) {
-      const scopeOperationId = `admission:${createHash("sha256")
-        .update(input.operationId)
-        .update("\0")
-        .update(getAdmissionScopeKey(scope))
-        .digest("hex")}`;
-      const result = input.ledger.acquireAdmission({
-        operationId: scopeOperationId,
-        operationKind: input.operationKind,
-        scope,
-      });
-      if (result.kind === "blocked") {
-        throw new TelegramWorkspaceAdmissionError(
-          "admission-blocked",
-          "Telegram Workspace operation is blocked by retirement.",
-        );
-      }
-      acquired.push(result.lease);
-    }
+    acquireTelegramWorkspaceAdmittedScopes(input, scopes, acquired);
   } catch (error) {
     releaseAll();
     releaseActiveOperation();
@@ -1081,12 +1348,37 @@ export function createTelegramWorkspaceAdmissionLedger(
   options: TelegramWorkspaceAdmissionLedgerOptions,
 ): TelegramWorkspaceAdmissionLedger {
   validateOptions(options);
+  const suppliedOptions = options;
+  if (options.stateProfile !== undefined)
+    options = { ...options, owner: { ...options.owner } };
   const getNowMs = options.getNowMs ?? Date.now;
   const getProcessLiveness =
     options.getProcessLiveness ??
     ((owner: TelegramWorkspaceAdmissionOwner) =>
       getTelegramProcessLiveness(owner));
   const transactionPath = `${options.path}.transaction`;
+  const path = options.path,
+    profileKey = options.profileKey,
+    stateProfile = options.stateProfile,
+    boundOwner = { ...options.owner };
+  const publication = {
+    publishRename: options.publishRename,
+    onPublicationBoundary: options.onPublicationBoundary,
+  };
+  const isStorageCurrent = (): boolean =>
+    suppliedOptions.path === path &&
+    suppliedOptions.profileKey === profileKey &&
+    suppliedOptions.stateProfile === stateProfile &&
+    areOwnersEqual(suppliedOptions.owner, boundOwner);
+  const mapStateError = (error: unknown): never => {
+    if (error instanceof TelegramRuntimeStateError)
+      throw new TelegramWorkspaceAdmissionError(
+        error.code === "invalid" ? "invalid-state" : error.code,
+        "Telegram consolidated admission state operation failed.",
+        { cause: error },
+      );
+    throw error;
+  };
 
   function transact<T>(
     operation: (state: TelegramWorkspaceAdmissionState) => {
@@ -1094,6 +1386,45 @@ export function createTelegramWorkspaceAdmissionLedger(
       changed: boolean;
     },
   ): T {
+    if (stateProfile !== undefined) {
+      try {
+        return mutateTelegramRuntimeStateSection(
+          path,
+          stateProfile,
+          "admission",
+          (current) => {
+            const state = normalizeAdmissionState(
+              current,
+              profileKey,
+              stateProfile,
+            );
+            const retained = state.leases.filter(
+              (lease) => getProcessLiveness(lease.owner) !== "dead",
+            );
+            const pruned = retained.length !== state.leases.length;
+            state.leases = retained;
+            const outcome = operation(state);
+            return {
+              value:
+                pruned || outcome.changed
+                  ? normalizeAdmissionState(state, profileKey, stateProfile)
+                  : current,
+              result: outcome.result,
+            };
+          },
+          {
+            isCurrent: isStorageCurrent,
+            publishRename: publication.publishRename,
+            onPublicationBoundary(boundary) {
+              if (boundary !== "after-rename")
+                publication.onPublicationBoundary?.(boundary, path);
+            },
+          },
+        );
+      } catch (error) {
+        return mapStateError(error);
+      }
+    }
     return withTelegramFileTransaction(transactionPath, () => {
       const state = readState(options.path, options.profileKey);
       const retainedLeases = state.leases.filter(
@@ -1108,14 +1439,38 @@ export function createTelegramWorkspaceAdmissionLedger(
   }
 
   function read(): TelegramWorkspaceAdmissionLedgerSnapshot {
-    const state = readState(options.path, options.profileKey);
+    let state: TelegramWorkspaceAdmissionState;
+    if (stateProfile !== undefined) {
+      if (!isStorageCurrent())
+        authorityChanged(
+          "Telegram consolidated admission storage authority changed.",
+        );
+      try {
+        const file = readTelegramRuntimeState(path);
+        const value = Object.hasOwn(file.profiles, stateProfile)
+          ? file.profiles[stateProfile]?.admission
+          : undefined;
+        state = normalizeAdmissionState(value, profileKey, stateProfile);
+        if (!isStorageCurrent())
+          authorityChanged(
+            "Telegram consolidated admission storage authority changed.",
+          );
+      } catch (error) {
+        return mapStateError(error);
+      }
+    } else state = readState(options.path, options.profileKey);
     return {
       profileKey: state.profileKey,
       leases: state.leases.map(cloneLease),
       ...(state.fence ? { fence: cloneFence(state.fence) } : {}),
-      ...(state.writerProtocolMode ? { writerProtocolMode: {
-        ...state.writerProtocolMode, installedBy: { ...state.writerProtocolMode.installedBy },
-      } } : {}),
+      ...(state.writerProtocolMode
+        ? {
+            writerProtocolMode: {
+              ...state.writerProtocolMode,
+              installedBy: { ...state.writerProtocolMode.installedBy },
+            },
+          }
+        : {}),
     };
   }
 
@@ -1130,13 +1485,19 @@ export function createTelegramWorkspaceAdmissionLedger(
     }
     validateScope(input.scope);
     return transact<TelegramWorkspaceAdmissionAcquireResult>((state) => {
-      const journalOperation = input.operationKind === "journal-write" ||
+      const journalOperation =
+        input.operationKind === "journal-write" ||
         input.operationKind.startsWith("journal.");
-      const protocolWriterHeld = state.leases.some(lease =>
-        lease.operationKind === "journal-write:custody-v3" && lease.scope.kind === "profile" &&
-        areOwnersEqual(lease.owner, options.owner));
+      const protocolWriterHeld = state.leases.some(
+        (lease) =>
+          lease.operationKind === "journal-write:custody-v3" &&
+          lease.scope.kind === "profile" &&
+          areOwnersEqual(lease.owner, options.owner),
+      );
       if (state.writerProtocolMode && journalOperation && !protocolWriterHeld)
-        authorityChanged("Telegram Workspace journal writer requires protocol authority.");
+        authorityChanged(
+          "Telegram Workspace journal writer requires protocol authority.",
+        );
       const existing = state.leases.find(
         (lease) => lease.operationId === input.operationId,
       );
@@ -1150,22 +1511,33 @@ export function createTelegramWorkspaceAdmissionLedger(
           acquiredAtMs: existing.acquiredAtMs,
         };
         if (!areLeasesEqual(existing, retried)) {
-          authorityChanged("Telegram Workspace admission operation identity changed.");
+          authorityChanged(
+            "Telegram Workspace admission operation identity changed.",
+          );
         }
         return {
-          result: { kind: "acquired", lease: cloneLease(existing), resumed: true },
+          result: {
+            kind: "acquired",
+            lease: cloneLease(existing),
+            resumed: true,
+          },
           changed: false,
         };
       }
-      if (state.fence && (!isTelegramWorkspaceRetirementFence(state.fence) ||
-      scopesConflict(input.scope, state.fence.target))) {
+      if (
+        state.fence &&
+        (!isTelegramWorkspaceRetirementFence(state.fence) ||
+          scopesConflict(input.scope, state.fence.target))
+      ) {
         return {
           result: { kind: "blocked", reason: "retirement-fenced" },
           changed: false,
         };
       }
       if (state.leases.length >= TELEGRAM_WORKSPACE_ADMISSION_MAX_LEASES) {
-        invalidState("Telegram Workspace admission lease capacity is exhausted.");
+        invalidState(
+          "Telegram Workspace admission lease capacity is exhausted.",
+        );
       }
       const lease: TelegramWorkspaceAdmissionLease = {
         operationId: input.operationId,
@@ -1183,10 +1555,14 @@ export function createTelegramWorkspaceAdmissionLedger(
     });
   }
 
-  function releaseAdmission(expected: TelegramWorkspaceAdmissionLease): boolean {
+  function releaseAdmission(
+    expected: TelegramWorkspaceAdmissionLease,
+  ): boolean {
     validateExpectedLease(expected, options.profileKey);
     if (!areOwnersEqual(expected.owner, options.owner)) {
-      authorityChanged("Telegram Workspace admission release requires lease owner authority.");
+      authorityChanged(
+        "Telegram Workspace admission release requires lease owner authority.",
+      );
     }
     return transact((state) => {
       const index = state.leases.findIndex(
@@ -1195,67 +1571,138 @@ export function createTelegramWorkspaceAdmissionLedger(
       if (index < 0) return { result: false, changed: false };
       const current = state.leases[index];
       if (!areLeasesEqual(current, expected)) {
-        authorityChanged("Telegram Workspace admission lease authority changed.");
+        authorityChanged(
+          "Telegram Workspace admission lease authority changed.",
+        );
       }
       state.leases.splice(index, 1);
       return { result: true, changed: true };
     });
   }
 
-  function acquireJournalWriterClosure(input: { operationId: string; recoveryKey: string;
-    requestedAtMs: number }): TelegramWorkspaceJournalWriterClosureAcquireResult {
+  function acquireJournalWriterClosure(input: {
+    operationId: string;
+    recoveryKey: string;
+    requestedAtMs: number;
+  }): TelegramWorkspaceJournalWriterClosureAcquireResult {
     validateOperationId(input.operationId);
-    const candidate = normalizeTelegramWorkspaceJournalWriterClosureFence({
-      destructiveKind: "journal-writer-closure", phase: "fenced", ...input,
-      profileKey: options.profileKey, owner: options.owner, acquiredAtMs: getNowMs(),
-    }, options.profileKey);
-    if (!candidate) invalidInput("Telegram Workspace writer closure input is invalid.");
-    return transact<TelegramWorkspaceJournalWriterClosureAcquireResult>((state) => {
-      if (state.writerProtocolMode) {
+    const candidate = normalizeTelegramWorkspaceJournalWriterClosureFence(
+      {
+        destructiveKind: "journal-writer-closure",
+        phase: "fenced",
+        ...input,
+        profileKey: options.profileKey,
+        owner: options.owner,
+        acquiredAtMs: getNowMs(),
+      },
+      options.profileKey,
+    );
+    if (!candidate)
+      invalidInput("Telegram Workspace writer closure input is invalid.");
+    return transact<TelegramWorkspaceJournalWriterClosureAcquireResult>(
+      (state) => {
+        if (state.writerProtocolMode) {
+          if (state.leases.length > 0)
+            return {
+              result: { kind: "blocked", reason: "admission-active" },
+              changed: false,
+            };
+          let authorized = false;
+          if (state.writerProtocolMode.recoveryKey === candidate.recoveryKey) {
+            try {
+              authorized =
+                options.authorizeJournalWriterProtocolClosure?.({
+                  mode: {
+                    ...state.writerProtocolMode,
+                    installedBy: { ...state.writerProtocolMode.installedBy },
+                  },
+                  closure: cloneFence(candidate),
+                }) === true;
+            } catch {
+              authorized = false;
+            }
+          }
+          if (!authorized)
+            return {
+              result: { kind: "blocked", reason: "retirement-active" },
+              changed: false,
+            };
+          delete state.writerProtocolMode;
+          state.fence = candidate;
+          return {
+            result: {
+              kind: "acquired",
+              fence: cloneFence(candidate),
+              resumed: false,
+            },
+            changed: true,
+          };
+        }
+        if (state.fence) {
+          if (state.fence.destructiveKind === "journal-writer-closure") {
+            const resumed = {
+              ...candidate,
+              acquiredAtMs: state.fence.acquiredAtMs,
+            };
+            if (areWriterClosureFencesEqual(state.fence, resumed))
+              return {
+                result: {
+                  kind: "acquired",
+                  fence: cloneFence(state.fence),
+                  resumed: true,
+                },
+                changed: false,
+              };
+            if (state.fence.operationId === candidate.operationId)
+              authorityChanged(
+                "Telegram Workspace writer closure authority changed.",
+              );
+          }
+          return {
+            result: { kind: "blocked", reason: "retirement-active" },
+            changed: false,
+          };
+        }
         if (state.leases.length > 0)
-          return { result: { kind: "blocked", reason: "admission-active" }, changed: false };
-        let authorized = false;
-        if (state.writerProtocolMode.recoveryKey === candidate.recoveryKey) {
-          try { authorized = options.authorizeJournalWriterProtocolClosure?.({
-            mode: { ...state.writerProtocolMode,
-              installedBy: { ...state.writerProtocolMode.installedBy } },
-            closure: cloneFence(candidate),
-          }) === true; } catch { authorized = false; }
-        }
-        if (!authorized)
-          return { result: { kind: "blocked", reason: "retirement-active" }, changed: false };
-        delete state.writerProtocolMode;
+          return {
+            result: { kind: "blocked", reason: "admission-active" },
+            changed: false,
+          };
         state.fence = candidate;
-        return { result: { kind: "acquired", fence: cloneFence(candidate), resumed: false },
-          changed: true };
-      }
-      if (state.fence) {
-        if (state.fence.destructiveKind === "journal-writer-closure") {
-          const resumed = { ...candidate, acquiredAtMs: state.fence.acquiredAtMs };
-          if (areWriterClosureFencesEqual(state.fence, resumed))
-            return { result: { kind: "acquired", fence: cloneFence(state.fence), resumed: true }, changed: false };
-          if (state.fence.operationId === candidate.operationId)
-            authorityChanged("Telegram Workspace writer closure authority changed.");
-        }
-        return { result: { kind: "blocked", reason: "retirement-active" }, changed: false };
-      }
-      if (state.leases.length > 0)
-        return { result: { kind: "blocked", reason: "admission-active" }, changed: false };
-      state.fence = candidate;
-      return { result: { kind: "acquired", fence: cloneFence(candidate), resumed: false }, changed: true };
-    });
+        return {
+          result: {
+            kind: "acquired",
+            fence: cloneFence(candidate),
+            resumed: false,
+          },
+          changed: true,
+        };
+      },
+    );
   }
 
-  function releaseJournalWriterClosure(expected: TelegramWorkspaceJournalWriterClosureFence): boolean {
-    const normalized = normalizeTelegramWorkspaceJournalWriterClosureFence(expected, options.profileKey);
-    if (!normalized) invalidInput("Telegram Workspace writer closure authority is invalid.");
+  function releaseJournalWriterClosure(
+    expected: TelegramWorkspaceJournalWriterClosureFence,
+  ): boolean {
+    const normalized = normalizeTelegramWorkspaceJournalWriterClosureFence(
+      expected,
+      options.profileKey,
+    );
+    if (!normalized)
+      invalidInput("Telegram Workspace writer closure authority is invalid.");
     if (!areOwnersEqual(expected.owner, options.owner))
-      authorityChanged("Telegram Workspace writer closure release requires owner authority.");
+      authorityChanged(
+        "Telegram Workspace writer closure release requires owner authority.",
+      );
     return transact((state) => {
       if (!state.fence) return { result: false, changed: false };
-      if (state.fence.destructiveKind !== "journal-writer-closure" ||
-        !areWriterClosureFencesEqual(state.fence, expected))
-        authorityChanged("Telegram Workspace writer closure authority changed.");
+      if (
+        state.fence.destructiveKind !== "journal-writer-closure" ||
+        !areWriterClosureFencesEqual(state.fence, expected)
+      )
+        authorityChanged(
+          "Telegram Workspace writer closure authority changed.",
+        );
       delete state.fence;
       return { result: true, changed: true };
     });
@@ -1265,81 +1712,170 @@ export function createTelegramWorkspaceAdmissionLedger(
     expected: TelegramWorkspaceJournalWriterClosureFence,
     input: { startupAuthorityId: string; writerInventorySha256: string },
   ): TelegramWorkspaceJournalWriterProtocolInstallResult {
-    const normalizedClosure = normalizeTelegramWorkspaceJournalWriterClosureFence(expected,
-      options.profileKey);
+    const normalizedClosure =
+      normalizeTelegramWorkspaceJournalWriterClosureFence(
+        expected,
+        options.profileKey,
+      );
     if (!normalizedClosure || !areOwnersEqual(expected.owner, options.owner))
-      authorityChanged("Telegram Workspace writer protocol installation requires closure owner authority.");
-    const candidate = normalizeTelegramWorkspaceJournalWriterProtocolMode({ version: 1,
-      protocol: "custody-v3", profileKey: options.profileKey, recoveryKey: expected.recoveryKey,
-      startupAuthorityId: input.startupAuthorityId, closureOperationId: expected.operationId,
-      writerInventorySha256: input.writerInventorySha256, installedBy: options.owner,
-      installedAtMs: getNowMs() }, options.profileKey);
-    if (!candidate) invalidInput("Telegram Workspace writer protocol mode input is invalid.");
-    return transact<TelegramWorkspaceJournalWriterProtocolInstallResult>((state) => {
-      if (state.writerProtocolMode) {
-        const resumed = { ...candidate, installedAtMs: state.writerProtocolMode.installedAtMs };
-        if (areWriterProtocolModesEqual(state.writerProtocolMode, resumed) && !state.fence)
-          return { result: { mode: { ...state.writerProtocolMode,
-            installedBy: { ...state.writerProtocolMode.installedBy } }, resumed: true }, changed: false };
-        authorityChanged("Telegram Workspace writer protocol mode authority changed.");
-      }
-      if (!state.fence || state.fence.destructiveKind !== "journal-writer-closure" ||
-        !areWriterClosureFencesEqual(state.fence, expected) || state.leases.length !== 0)
-        authorityChanged("Telegram Workspace writer closure authority changed before protocol installation.");
-      state.writerProtocolMode = candidate;
-      delete state.fence;
-      return { result: { mode: { ...candidate, installedBy: { ...candidate.installedBy } },
-        resumed: false }, changed: true };
-    });
+      authorityChanged(
+        "Telegram Workspace writer protocol installation requires closure owner authority.",
+      );
+    const candidate = normalizeTelegramWorkspaceJournalWriterProtocolMode(
+      {
+        version: 1,
+        protocol: "custody-v3",
+        profileKey: options.profileKey,
+        recoveryKey: expected.recoveryKey,
+        startupAuthorityId: input.startupAuthorityId,
+        closureOperationId: expected.operationId,
+        writerInventorySha256: input.writerInventorySha256,
+        installedBy: options.owner,
+        installedAtMs: getNowMs(),
+      },
+      options.profileKey,
+    );
+    if (!candidate)
+      invalidInput("Telegram Workspace writer protocol mode input is invalid.");
+    return transact<TelegramWorkspaceJournalWriterProtocolInstallResult>(
+      (state) => {
+        if (state.writerProtocolMode) {
+          const resumed = {
+            ...candidate,
+            installedAtMs: state.writerProtocolMode.installedAtMs,
+          };
+          if (
+            areWriterProtocolModesEqual(state.writerProtocolMode, resumed) &&
+            !state.fence
+          )
+            return {
+              result: {
+                mode: {
+                  ...state.writerProtocolMode,
+                  installedBy: { ...state.writerProtocolMode.installedBy },
+                },
+                resumed: true,
+              },
+              changed: false,
+            };
+          authorityChanged(
+            "Telegram Workspace writer protocol mode authority changed.",
+          );
+        }
+        if (
+          !state.fence ||
+          state.fence.destructiveKind !== "journal-writer-closure" ||
+          !areWriterClosureFencesEqual(state.fence, expected) ||
+          state.leases.length !== 0
+        )
+          authorityChanged(
+            "Telegram Workspace writer closure authority changed before protocol installation.",
+          );
+        state.writerProtocolMode = candidate;
+        delete state.fence;
+        return {
+          result: {
+            mode: { ...candidate, installedBy: { ...candidate.installedBy } },
+            resumed: false,
+          },
+          changed: true,
+        };
+      },
+    );
   }
 
-  function acquireJournalWriterAdmission(input: { operationId: string; recoveryKey: string;
-    startupAuthorityId: string; closureOperationId: string; writerInventorySha256: string }):
-    TelegramWorkspaceAdmissionAcquireResult {
+  function acquireJournalWriterAdmission(input: {
+    operationId: string;
+    recoveryKey: string;
+    startupAuthorityId: string;
+    closureOperationId: string;
+    writerInventorySha256: string;
+  }): TelegramWorkspaceAdmissionAcquireResult {
     validateOperationId(input.operationId);
-    if (!isBoundedText(input.recoveryKey) || !isBoundedText(input.startupAuthorityId) ||
-      !isBoundedText(input.closureOperationId) || !/^[a-f0-9]{64}$/u.test(input.writerInventorySha256))
-      invalidInput("Telegram Workspace journal writer protocol authority is invalid.");
+    if (
+      !isBoundedText(input.recoveryKey) ||
+      !isBoundedText(input.startupAuthorityId) ||
+      !isBoundedText(input.closureOperationId) ||
+      !/^[a-f0-9]{64}$/u.test(input.writerInventorySha256)
+    )
+      invalidInput(
+        "Telegram Workspace journal writer protocol authority is invalid.",
+      );
     return transact<TelegramWorkspaceAdmissionAcquireResult>((state) => {
       const mode = state.writerProtocolMode;
-      if (!mode || mode.recoveryKey !== input.recoveryKey ||
+      if (
+        !mode ||
+        mode.recoveryKey !== input.recoveryKey ||
         mode.startupAuthorityId !== input.startupAuthorityId ||
         mode.closureOperationId !== input.closureOperationId ||
-        mode.writerInventorySha256 !== input.writerInventorySha256)
-        authorityChanged("Telegram Workspace journal writer protocol authority changed.");
-      const existing = state.leases.find(lease => lease.operationId === input.operationId);
+        mode.writerInventorySha256 !== input.writerInventorySha256
+      )
+        authorityChanged(
+          "Telegram Workspace journal writer protocol authority changed.",
+        );
+      const existing = state.leases.find(
+        (lease) => lease.operationId === input.operationId,
+      );
       const operationKind = "journal-write:custody-v3";
       if (existing) {
-        const retried: TelegramWorkspaceAdmissionLease = { operationId: input.operationId,
-          operationKind, profileKey: options.profileKey, scope: { kind: "profile" },
-          owner: { ...options.owner }, acquiredAtMs: existing.acquiredAtMs };
+        const retried: TelegramWorkspaceAdmissionLease = {
+          operationId: input.operationId,
+          operationKind,
+          profileKey: options.profileKey,
+          scope: { kind: "profile" },
+          owner: { ...options.owner },
+          acquiredAtMs: existing.acquiredAtMs,
+        };
         if (!areLeasesEqual(existing, retried))
-          authorityChanged("Telegram Workspace journal writer operation identity changed.");
-        return { result: { kind: "acquired", lease: cloneLease(existing), resumed: true },
-          changed: false };
+          authorityChanged(
+            "Telegram Workspace journal writer operation identity changed.",
+          );
+        return {
+          result: {
+            kind: "acquired",
+            lease: cloneLease(existing),
+            resumed: true,
+          },
+          changed: false,
+        };
       }
-      if (state.fence) return { result: { kind: "blocked", reason: "retirement-fenced" },
-        changed: false };
+      if (state.fence)
+        return {
+          result: { kind: "blocked", reason: "retirement-fenced" },
+          changed: false,
+        };
       if (state.leases.length >= TELEGRAM_WORKSPACE_ADMISSION_MAX_LEASES)
-        invalidState("Telegram Workspace admission lease capacity is exhausted.");
-      const lease: TelegramWorkspaceAdmissionLease = { operationId: input.operationId,
-        operationKind, profileKey: options.profileKey, scope: { kind: "profile" },
-        owner: { ...options.owner }, acquiredAtMs: getNowMs() };
+        invalidState(
+          "Telegram Workspace admission lease capacity is exhausted.",
+        );
+      const lease: TelegramWorkspaceAdmissionLease = {
+        operationId: input.operationId,
+        operationKind,
+        profileKey: options.profileKey,
+        scope: { kind: "profile" },
+        owner: { ...options.owner },
+        acquiredAtMs: getNowMs(),
+      };
       state.leases.push(lease);
-      return { result: { kind: "acquired", lease: cloneLease(lease), resumed: false },
-        changed: true };
+      return {
+        result: { kind: "acquired", lease: cloneLease(lease), resumed: false },
+        changed: true,
+      };
     });
   }
 
-  function acquireDestructiveFence(input: {
-    operationId: string;
-    retirementIntentId: string;
-    bindingKey: string;
-    slot: string;
-    target: TelegramTarget & { threadId: number };
-    leaderEpoch: number | string;
-    retirementRequestedAtMs: number;
-  }, destructiveKind?: TelegramWorkspaceDeletionFenceKind): TelegramWorkspaceRetirementFenceAcquireResult {
+  function acquireDestructiveFence(
+    input: {
+      operationId: string;
+      retirementIntentId: string;
+      bindingKey: string;
+      slot: string;
+      target: TelegramTarget & { threadId: number };
+      leaderEpoch: number | string;
+      retirementRequestedAtMs: number;
+    },
+    destructiveKind?: TelegramWorkspaceDeletionFenceKind,
+  ): TelegramWorkspaceRetirementFenceAcquireResult {
     validateOperationId(input.operationId);
     const candidate = normalizeFence(
       {
@@ -1358,7 +1894,10 @@ export function createTelegramWorkspaceAdmissionLedger(
     return transact<TelegramWorkspaceRetirementFenceAcquireResult>((state) => {
       if (state.fence) {
         if (!isTelegramWorkspaceRetirementFence(state.fence)) {
-          return { result: { kind: "blocked", reason: "retirement-active" }, changed: false };
+          return {
+            result: { kind: "blocked", reason: "retirement-active" },
+            changed: false,
+          };
         }
         if (
           state.fence.phase === "fenced" &&
@@ -1377,14 +1916,20 @@ export function createTelegramWorkspaceAdmissionLedger(
           };
         }
         if (state.fence.operationId === candidate.operationId) {
-          authorityChanged("Telegram Workspace retirement fence authority changed.");
+          authorityChanged(
+            "Telegram Workspace retirement fence authority changed.",
+          );
         }
         return {
           result: { kind: "blocked", reason: "retirement-active" },
           changed: false,
         };
       }
-      if (state.leases.some((lease) => scopesConflict(lease.scope, candidate.target))) {
+      if (
+        state.leases.some((lease) =>
+          scopesConflict(lease.scope, candidate.target),
+        )
+      ) {
         return {
           result: { kind: "blocked", reason: "admission-active" },
           changed: false,
@@ -1392,23 +1937,54 @@ export function createTelegramWorkspaceAdmissionLedger(
       }
       state.fence = candidate;
       return {
-        result: { kind: "acquired", fence: cloneFence(candidate), resumed: false },
+        result: {
+          kind: "acquired",
+          fence: cloneFence(candidate),
+          resumed: false,
+        },
         changed: true,
       };
     });
   }
 
-  function acquireRetirementFence(input: Parameters<TelegramWorkspaceAdmissionLedger["acquireRetirementFence"]>[0]) {
+  function acquireRetirementFence(
+    input: Parameters<
+      TelegramWorkspaceAdmissionLedger["acquireRetirementFence"]
+    >[0],
+  ) {
     return acquireDestructiveFence(input);
   }
 
   function acquireThreadCleanupFence(
-    input: Parameters<TelegramWorkspaceAdmissionLedger["acquireThreadCleanupFence"]>[0],
+    input: Parameters<
+      TelegramWorkspaceAdmissionLedger["acquireThreadCleanupFence"]
+    >[0],
   ): TelegramWorkspaceRetirementFenceAcquireResult {
-    return acquireDestructiveFence({ operationId: input.operationId,
-      retirementIntentId: input.cleanupWorkSetId, bindingKey: input.bindingKey,
-      slot: input.slot, target: input.target, leaderEpoch: input.leaderEpoch,
-      retirementRequestedAtMs: input.cleanupRequestedAtMs }, "manual-thread-cleanup");
+    return acquireDestructiveFence(
+      {
+        operationId: input.operationId,
+        retirementIntentId: input.cleanupWorkSetId,
+        bindingKey: input.bindingKey,
+        slot: input.slot,
+        target: input.target,
+        leaderEpoch: input.leaderEpoch,
+        retirementRequestedAtMs: input.cleanupRequestedAtMs,
+      },
+      "manual-thread-cleanup",
+    );
+  }
+
+  // Exact profile/kind/owner preflight shared by owner-held fence transitions; the transaction still rechecks state.
+  function assertOwnedFence(
+    expected: TelegramWorkspaceRetirementFence,
+    expectedKind: TelegramWorkspaceDeletionFenceKind,
+    ownerMessage: string,
+  ): void {
+    validateExpectedFence(expected, options.profileKey);
+    if (resolveTelegramWorkspaceDestructiveFenceKind(expected) !== expectedKind)
+      authorityChanged("Telegram Workspace destructive fence kind changed.");
+    if (!areOwnersEqual(expected.owner, options.owner))
+      authorityChanged(ownerMessage);
   }
 
   function adoptRetirementFence(
@@ -1422,11 +1998,18 @@ export function createTelegramWorkspaceAdmissionLedger(
     validateExpectedFence(expected, options.profileKey);
     if (resolveTelegramWorkspaceDestructiveFenceKind(expected) !== expectedKind)
       authorityChanged("Telegram Workspace destructive fence kind changed.");
-    if (!normalizeOwner(replacement.owner) || !isLeaderEpoch(replacement.leaderEpoch)) {
-      invalidInput("Telegram Workspace retirement successor authority is invalid.");
+    if (
+      !normalizeOwner(replacement.owner) ||
+      !isLeaderEpoch(replacement.leaderEpoch)
+    ) {
+      invalidInput(
+        "Telegram Workspace retirement successor authority is invalid.",
+      );
     }
     if (!areOwnersEqual(replacement.owner, options.owner)) {
-      authorityChanged("Telegram Workspace retirement adoption requires successor owner authority.");
+      authorityChanged(
+        "Telegram Workspace retirement adoption requires successor owner authority.",
+      );
     }
     const adopted = {
       ...cloneFence(expected),
@@ -1435,13 +2018,17 @@ export function createTelegramWorkspaceAdmissionLedger(
     } satisfies TelegramWorkspaceRetirementFence;
     return transact((state) => {
       if (!state.fence || !isTelegramWorkspaceRetirementFence(state.fence)) {
-        authorityChanged("Telegram Workspace retirement fence is absent or has another kind.");
+        authorityChanged(
+          "Telegram Workspace retirement fence is absent or has another kind.",
+        );
       }
       if (areFencesEqual(state.fence, adopted)) {
         return { result: cloneFence(state.fence), changed: false };
       }
       if (!areFencesEqual(state.fence, expected)) {
-        authorityChanged("Telegram Workspace retirement fence authority changed.");
+        authorityChanged(
+          "Telegram Workspace retirement fence authority changed.",
+        );
       }
       state.fence = adopted;
       return { result: cloneFence(adopted), changed: true };
@@ -1452,15 +2039,16 @@ export function createTelegramWorkspaceAdmissionLedger(
     expected: TelegramWorkspaceRetirementFence,
     expectedKind: TelegramWorkspaceDeletionFenceKind = "pressure-retirement",
   ): TelegramWorkspaceDeletionPermitResult {
-    validateExpectedFence(expected, options.profileKey);
-    if (resolveTelegramWorkspaceDestructiveFenceKind(expected) !== expectedKind)
-      authorityChanged("Telegram Workspace destructive fence kind changed.");
-    if (!areOwnersEqual(expected.owner, options.owner)) {
-      authorityChanged("Telegram Workspace deletion permit requires fence owner authority.");
-    }
+    assertOwnedFence(
+      expected,
+      expectedKind,
+      "Telegram Workspace deletion permit requires fence owner authority.",
+    );
     return transact<TelegramWorkspaceDeletionPermitResult>((state) => {
       if (!state.fence || !isTelegramWorkspaceRetirementFence(state.fence)) {
-        authorityChanged("Telegram Workspace retirement fence is absent or has another kind.");
+        authorityChanged(
+          "Telegram Workspace retirement fence is absent or has another kind.",
+        );
       }
       if (
         state.fence.operationId === expected.operationId &&
@@ -1473,7 +2061,9 @@ export function createTelegramWorkspaceAdmissionLedger(
         };
       }
       if (!areFencesEqual(state.fence, expected)) {
-        authorityChanged("Telegram Workspace retirement fence authority changed.");
+        authorityChanged(
+          "Telegram Workspace retirement fence authority changed.",
+        );
       }
       if (state.fence.phase !== "fenced") {
         return {
@@ -1493,7 +2083,9 @@ export function createTelegramWorkspaceAdmissionLedger(
           kind: "issued",
           fence: cloneFence(issued),
           permit: {
-            ...(issued.destructiveKind === undefined ? {} : { destructiveKind: issued.destructiveKind }),
+            ...(issued.destructiveKind === undefined
+              ? {}
+              : { destructiveKind: issued.destructiveKind }),
             operationId: issued.operationId,
             retirementIntentId: issued.retirementIntentId,
             profileKey: issued.profileKey,
@@ -1513,15 +2105,21 @@ export function createTelegramWorkspaceAdmissionLedger(
     expected: TelegramWorkspaceRetirementFence,
     expectedKind: TelegramWorkspaceDeletionFenceKind = "pressure-retirement",
   ): TelegramWorkspaceRetirementFence {
-    validateExpectedFence(expected, options.profileKey);
-    if (resolveTelegramWorkspaceDestructiveFenceKind(expected) !== expectedKind)
-      authorityChanged("Telegram Workspace destructive fence kind changed.");
-    if (!areOwnersEqual(expected.owner, options.owner)) {
-      authorityChanged("Telegram Workspace absence confirmation requires fence owner authority.");
+    assertOwnedFence(
+      expected,
+      expectedKind,
+      "Telegram Workspace absence confirmation requires fence owner authority.",
+    );
+    if (expected.phase === "deletion-rejected") {
+      authorityChanged(
+        "Rejected Telegram Workspace deletion cannot confirm absence.",
+      );
     }
     return transact((state) => {
       if (!state.fence || !isTelegramWorkspaceRetirementFence(state.fence)) {
-        authorityChanged("Telegram Workspace retirement fence is absent or has another kind.");
+        authorityChanged(
+          "Telegram Workspace retirement fence is absent or has another kind.",
+        );
       }
       if (
         state.fence.operationId === expected.operationId &&
@@ -1531,7 +2129,9 @@ export function createTelegramWorkspaceAdmissionLedger(
         return { result: cloneFence(state.fence), changed: false };
       }
       if (!areFencesEqual(state.fence, expected)) {
-        authorityChanged("Telegram Workspace retirement fence authority changed.");
+        authorityChanged(
+          "Telegram Workspace retirement fence authority changed.",
+        );
       }
       const ready: TelegramWorkspaceRetirementFence = {
         ...state.fence,
@@ -1550,75 +2150,166 @@ export function createTelegramWorkspaceAdmissionLedger(
     expected: TelegramWorkspaceRetirementFence,
     expectedKind: TelegramWorkspaceDeletionFenceKind = "pressure-retirement",
   ): boolean {
-    validateExpectedFence(expected, options.profileKey);
-    if (resolveTelegramWorkspaceDestructiveFenceKind(expected) !== expectedKind)
-      authorityChanged("Telegram Workspace destructive fence kind changed.");
-    if (!areOwnersEqual(expected.owner, options.owner)) {
-      authorityChanged("Telegram Workspace fence release requires owner authority.");
-    }
+    assertOwnedFence(
+      expected,
+      expectedKind,
+      "Telegram Workspace fence release requires owner authority.",
+    );
     return transact((state) => {
       if (!state.fence) return { result: false, changed: false };
       if (!isTelegramWorkspaceRetirementFence(state.fence))
-        authorityChanged("Telegram Workspace retirement fence has another kind.");
+        authorityChanged(
+          "Telegram Workspace retirement fence has another kind.",
+        );
       if (!areFencesEqual(state.fence, expected)) {
-        authorityChanged("Telegram Workspace retirement fence authority changed.");
+        authorityChanged(
+          "Telegram Workspace retirement fence authority changed.",
+        );
       }
       if (state.fence.phase !== "fenced") {
-        authorityChanged("Issued Telegram Workspace retirement fence cannot be released.");
+        authorityChanged(
+          "Issued Telegram Workspace retirement fence cannot be released.",
+        );
       }
       delete state.fence;
       return { result: true, changed: true };
+    });
+  }
+
+  function completeDestructiveFence(
+    expected: TelegramWorkspaceRetirementFence,
+    expectedKind: TelegramWorkspaceDeletionFenceKind,
+    requiredPhase: "commit-ready" | "deletion-rejected",
+  ): boolean {
+    assertOwnedFence(
+      expected,
+      expectedKind,
+      "Telegram Workspace fence completion requires owner authority.",
+    );
+    return transact((state) => {
+      if (!state.fence) return { result: false, changed: false };
+      if (!isTelegramWorkspaceRetirementFence(state.fence))
+        authorityChanged(
+          "Telegram Workspace retirement fence has another kind.",
+        );
+      if (!areFencesEqual(state.fence, expected)) {
+        authorityChanged(
+          "Telegram Workspace retirement fence authority changed.",
+        );
+      }
+      if (state.fence.phase !== requiredPhase) {
+        authorityChanged(
+          requiredPhase === "commit-ready"
+            ? "Telegram Workspace retirement commit is not ready."
+            : "Telegram Workspace retirement rejection is not confirmed.",
+        );
+      }
+      delete state.fence;
+      return { result: true, changed: true };
+    });
+  }
+
+  function confirmRetirementRejection(
+    expected: TelegramWorkspaceRetirementFence,
+  ): TelegramWorkspaceRetirementFence {
+    validateExpectedFence(expected, options.profileKey);
+    if (
+      resolveTelegramWorkspaceDestructiveFenceKind(expected) !==
+        "pressure-retirement" ||
+      !areOwnersEqual(expected.owner, options.owner) ||
+      (expected.phase !== "deletion-issued" &&
+        expected.phase !== "deletion-rejected")
+    ) {
+      authorityChanged(
+        "Telegram Workspace rejection requires exact issued retirement authority.",
+      );
+    }
+    return transact((state) => {
+      const current = state.fence;
+      if (
+        !current ||
+        !isTelegramWorkspaceRetirementFence(current) ||
+        !areFenceBasesEqual(current, expected) ||
+        (current.phase !== "deletion-issued" &&
+          current.phase !== "deletion-rejected") ||
+        current.deletionIssuedAtMs !== expected.deletionIssuedAtMs ||
+        (expected.phase === "deletion-rejected" &&
+          !areFencesEqual(current, expected))
+      ) {
+        authorityChanged(
+          "Telegram Workspace retirement fence authority changed.",
+        );
+      }
+      if (current.phase === "deletion-rejected")
+        return { result: cloneFence(current), changed: false };
+      const rejected: TelegramWorkspaceRetirementFence = {
+        ...current,
+        destructiveKind: "pressure-retirement",
+        phase: "deletion-rejected",
+        rejectionConfirmedAtMs: getNowMs(),
+      };
+      state.fence = rejected;
+      return { result: cloneFence(rejected), changed: true };
     });
   }
 
   function completeRetirementFence(
     expected: TelegramWorkspaceRetirementFence,
     expectedKind: TelegramWorkspaceDeletionFenceKind = "pressure-retirement",
-  ): boolean {
-    validateExpectedFence(expected, options.profileKey);
-    if (resolveTelegramWorkspaceDestructiveFenceKind(expected) !== expectedKind)
-      authorityChanged("Telegram Workspace destructive fence kind changed.");
-    if (!areOwnersEqual(expected.owner, options.owner)) {
-      authorityChanged("Telegram Workspace fence completion requires owner authority.");
-    }
-    return transact((state) => {
-      if (!state.fence) return { result: false, changed: false };
-      if (!isTelegramWorkspaceRetirementFence(state.fence))
-        authorityChanged("Telegram Workspace retirement fence has another kind.");
-      if (!areFencesEqual(state.fence, expected)) {
-        authorityChanged("Telegram Workspace retirement fence authority changed.");
-      }
-      if (state.fence.phase !== "commit-ready") {
-        authorityChanged("Telegram Workspace retirement commit is not ready.");
-      }
-      delete state.fence;
-      return { result: true, changed: true };
-    });
+  ) {
+    return completeDestructiveFence(expected, expectedKind, "commit-ready");
+  }
+  function completeRejectedRetirementFence(
+    expected: TelegramWorkspaceRetirementFence,
+  ) {
+    return completeDestructiveFence(
+      expected,
+      "pressure-retirement",
+      "deletion-rejected",
+    );
   }
 
-  function adoptThreadCleanupFence(expected: TelegramWorkspaceRetirementFence,
-    replacement: { owner: TelegramWorkspaceAdmissionOwner; leaderEpoch: number | string }) {
+  function adoptThreadCleanupFence(
+    expected: TelegramWorkspaceRetirementFence,
+    replacement: {
+      owner: TelegramWorkspaceAdmissionOwner;
+      leaderEpoch: number | string;
+    },
+  ) {
     return adoptRetirementFence(expected, replacement, "manual-thread-cleanup");
   }
-  function issueThreadCleanupDeletionPermit(expected: TelegramWorkspaceRetirementFence) {
+  function issueThreadCleanupDeletionPermit(
+    expected: TelegramWorkspaceRetirementFence,
+  ) {
     return issueDeletionPermit(expected, "manual-thread-cleanup");
   }
-  function confirmThreadCleanupAbsence(expected: TelegramWorkspaceRetirementFence) {
+  function confirmThreadCleanupAbsence(
+    expected: TelegramWorkspaceRetirementFence,
+  ) {
     return confirmRetirementAbsence(expected, "manual-thread-cleanup");
   }
-  function releaseUnissuedThreadCleanupFence(expected: TelegramWorkspaceRetirementFence) {
+  function releaseUnissuedThreadCleanupFence(
+    expected: TelegramWorkspaceRetirementFence,
+  ) {
     return releaseUnissuedRetirementFence(expected, "manual-thread-cleanup");
   }
-  function completeThreadCleanupFence(expected: TelegramWorkspaceRetirementFence) {
+  function completeThreadCleanupFence(
+    expected: TelegramWorkspaceRetirementFence,
+  ) {
     return completeRetirementFence(expected, "manual-thread-cleanup");
   }
 
   return {
-    getProfileKey: () => options.profileKey,
-    getOwner: () => ({ ...options.owner }),
+    getProfileKey: () =>
+      stateProfile === undefined ? options.profileKey : profileKey,
+    getOwner: () => ({
+      ...(stateProfile === undefined ? options.owner : boundOwner),
+    }),
     listReservedSlots: () => {
       const fence = read().fence;
-      return fence && isTelegramWorkspaceRetirementFence(fence) ? [fence.slot] : [];
+      return fence && isTelegramWorkspaceRetirementFence(fence)
+        ? [fence.slot]
+        : [];
     },
     read,
     acquireAdmission,
@@ -1635,6 +2326,8 @@ export function createTelegramWorkspaceAdmissionLedger(
     issueThreadCleanupDeletionPermit,
     confirmRetirementAbsence,
     confirmThreadCleanupAbsence,
+    confirmRetirementRejection,
+    completeRejectedRetirementFence,
     releaseUnissuedRetirementFence,
     releaseUnissuedThreadCleanupFence,
     completeRetirementFence,

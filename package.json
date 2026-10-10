@@ -1,6 +1,6 @@
 {
   "name": "@llblab/pi-telegram",
-  "version": "0.49.0",
+  "version": "0.54.3",
   "private": false,
   "publishConfig": {
     "access": "public"
@@ -27,16 +27,17 @@
     "node": ">=22.19.0"
   },
   "scripts": {
-    "test": "node --experimental-strip-types --test --test-concurrency=4 --test-reporter=dot tests/*.test.ts",
-    "test:verbose": "node --experimental-strip-types --test --test-reporter=spec tests/*.test.ts",
+    "test": "node --experimental-strip-types --import ./tests/fixtures/canonical-tmpdir.ts --test --test-concurrency=4 --test-reporter=dot tests/*.test.ts",
+    "test:verbose": "node --experimental-strip-types --import ./tests/fixtures/canonical-tmpdir.ts --test --test-reporter=spec tests/*.test.ts",
     "typecheck": "tsc --noEmit",
     "build": "node scripts/build-dist.mjs",
+    "build:check": "node scripts/build-dist.mjs --check",
     "prepack": "npm run build",
     "check": "node -e \"await import('./dist/pi-telegram/index.js'); console.log('pi-telegram: extension import ok')\"",
     "audit": "npm audit --omit=peer --registry=https://registry.npmjs.org",
     "audit:host": "npm audit",
     "pack:check": "npm pack --dry-run",
-    "validate": "npm run build && npm run typecheck && npm test && npm run audit && npm run check && npm run pack:check"
+    "validate": "npm run build:check && npm run typecheck && npm test && npm run audit && npm run check && npm run pack:check"
   },
   "files": [
     "index.ts",
@@ -102,21 +103,15 @@
     "extensions": [
       "./dist/pi-telegram/index.js"
     ],
-    "sourceExtensions": [
-      "./index.ts"
-    ],
     "skills": [
       "./dist/skills"
-    ],
-    "sourceSkills": [
-      "./skills"
     ],
     "image": "https://raw.githubusercontent.com/llblab/pi-telegram/main/screenshot.png"
   },
   "peerDependencies": {
-    "@earendil-works/pi-agent-core": ">=0.84.4",
-    "@earendil-works/pi-ai": ">=0.84.4",
-    "@earendil-works/pi-coding-agent": ">=0.84.4",
+    "@earendil-works/pi-agent-core": ">=1.0.0",
+    "@earendil-works/pi-ai": ">=1.0.0",
+    "@earendil-works/pi-coding-agent": ">=1.0.0",
     "@sinclair/typebox": "*"
   },
   "devDependencies": {

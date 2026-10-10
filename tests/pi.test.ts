@@ -58,6 +58,7 @@ test("Pi context mode helpers feature-detect passive run modes", () => {
 });
 
 test("Pi session identity adapter is lifecycle-alias agnostic", () => {
+  assert.equal(getExtensionContextSessionId(undefined), undefined, "Missing context cannot invent a session identity");
   const sessionManager = { getSessionId: () => "stable-session" };
   for (const lifecycleAlias of ["restart", "reload", "resume", "continue-recent"]) {
     const ctx = { sessionManager, lifecycleAlias } as unknown as ExtensionContext;
@@ -119,7 +120,7 @@ test("Pi API runtime ports bind methods without losing receiver context", async 
   assert.deepEqual(runtime.getActiveTools(), ["read"]);
   runtime.setActiveTools(["read", "telegram_attach"]);
   assert.equal(await runtime.setModel(createHarnessModel("gpt-5")), true);
-  runtime.registerCommand("telegram-session-action", {
+  runtime.registerCommand("telegram-internal", {
     description: "internal",
     handler: async () => {},
   });
@@ -132,7 +133,7 @@ test("Pi API runtime ports bind methods without losing receiver context", async 
     "get-tools",
     "set-tools:read,telegram_attach",
     "model:gpt-5",
-    "command:telegram-session-action",
+    "command:telegram-internal",
   ]);
 });
 

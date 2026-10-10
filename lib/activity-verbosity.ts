@@ -9,6 +9,10 @@ import type {
   TelegramActivityPublicationRuntime,
 } from "./activity.ts";
 import { escapeHtml } from "./rendering.ts";
+import {
+  areTelegramTargetsEqual as targetEquals,
+  type TelegramTarget,
+} from "./target.ts";
 import type {
   TelegramEditMessageTextBody,
   TelegramInputRichBlock,
@@ -18,10 +22,9 @@ import type {
   TelegramSendRichMessageBody,
   TelegramSentMessage,
 } from "./telegram-api.ts";
-import type { TelegramTarget } from "./target.ts";
 
-export const TELEGRAM_ACTIVITY_DETAIL_MAX_CHARS = 1_200;
-export const TELEGRAM_ACTIVITY_MESSAGE_MAX_CHARS = 3_900;
+const TELEGRAM_ACTIVITY_DETAIL_MAX_CHARS = 1_200;
+const TELEGRAM_ACTIVITY_MESSAGE_MAX_CHARS = 3_900;
 export const TELEGRAM_ACTIVITY_MESSAGE_MAX_TOOLS = 6;
 export const TELEGRAM_REASONING_MESSAGE_MAX_FRAMES = 24;
 export const TELEGRAM_REASONING_BUFFER_MAX_CHARS = 16_000;
@@ -61,10 +64,6 @@ interface ToolMessage {
 interface ReasoningMessage {
   messageId: number;
   target: TelegramTarget;
-}
-
-function targetEquals(left: TelegramTarget, right: TelegramTarget): boolean {
-  return left.chatId === right.chatId && left.threadId === right.threadId;
 }
 
 function redactActivityText(text: string): string {
@@ -576,32 +575,6 @@ export interface TelegramActivityVerbosityRuntime {
   reset: () => void;
   stop: () => void;
   waitForIdle: () => Promise<void>;
-}
-
-export interface TelegramActivityVerbosityBinding
-  extends TelegramActivityVerbosityRuntime {
-  bind: (runtime: TelegramActivityVerbosityRuntime) => void;
-}
-
-export function createTelegramActivityVerbosityBinding(): TelegramActivityVerbosityBinding {
-  let runtime: TelegramActivityVerbosityRuntime | undefined;
-  return {
-    bind(next) {
-      runtime = next;
-    },
-    accept(event) {
-      runtime?.accept(event);
-    },
-    reset() {
-      runtime?.reset();
-    },
-    stop() {
-      runtime?.stop();
-    },
-    waitForIdle() {
-      return runtime?.waitForIdle() ?? Promise.resolve();
-    },
-  };
 }
 
 export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
@@ -1137,11 +1110,7 @@ export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
       return;
     }
     if (event.type === "agent-end" || event.type === "agent-settled") {
-      if (
-        reasoningMessage &&
-        reasoningChars > lastReasoningMessageChars &&
-        !reasoningBlocked
-      ) {
+      if (reasoningChars > lastReasoningMessageChars && !reasoningBlocked) {
         await publishReasoning(event, acceptedGeneration);
       }
       if (!isCurrent(acceptedGeneration, admittedAuthority)) return;

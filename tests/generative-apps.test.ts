@@ -32,7 +32,6 @@ import {
   formatGenerativeAppToolOutput,
   installGenerativeApp,
   invokeGenerativeApp,
-  invokeGenerativeAppBoundAction,
   parseGenerativeAppBoundAction,
   registerTelegramBindTool,
   resolveGenerativeAppDir,
@@ -167,9 +166,9 @@ test("Generative App install initializes state and later methods commit or remai
       ),
       { count: 2 },
     );
-    const incremented = await invokeGenerativeAppBoundAction({
+    const incremented = await invokeGenerativeApp({
       agentDir,
-      prompt: "counter::increment(3)",
+      ...parseGenerativeAppBoundAction("counter::increment(3)")!,
     });
     assert.ok(incremented);
     assert.equal(incremented.output, "5");
@@ -475,12 +474,10 @@ export function echo({ argument }) { return { output: JSON.stringify(argument ??
       '{"a":[1,2],"b":"x"}',
     );
     assert.equal(
-      (
-        await invokeGenerativeAppBoundAction({
-          agentDir,
-          prompt: 'echo::echo({"nested":{"n":true}})',
-        })
-      )?.output,
+      (await invokeGenerativeApp({
+        agentDir,
+        ...parseGenerativeAppBoundAction('echo::echo({"nested":{"n":true}})')!,
+      })).output,
       '{"nested":{"n":true}}',
     );
   } finally {
@@ -828,6 +825,50 @@ export async function inspect({ run, argument }) {
       stderr: "",
       stdout: "literal;not-a-shell",
     });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Generative App worker never starts a process after cancellation", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-telegram-generative-app-"));
+  const agentDir = join(root, "agent");
+  try {
+    const marker = join(root, "after-abort.txt");
+    const script = await writeApp(
+      root,
+      "after-abort",
+      `
+export function init() { return { state: {}, output: "ready" }; }
+export async function mutate({ run, signal }) {
+  await new Promise((resolve) => signal.addEventListener("abort", resolve, { once: true }));
+  await run({
+    command: process.execPath,
+    args: ["-e", ${JSON.stringify(`require("node:fs").writeFileSync(${JSON.stringify(marker)}, "orphan")`)}],
+    cwd: ${JSON.stringify(root)},
+    timeoutMs: 1000,
+  });
+  return { state: {}, output: "unreachable" };
+}
+`,
+    );
+    await installGenerativeApp({ agentDir, app: "after-abort", script });
+    const execution = new AbortController();
+    const pending = invokeGenerativeApp({
+      agentDir,
+      execution: {
+        assertCurrent: () => {
+          if (execution.signal.aborted) throw new Error("stale execution");
+        },
+        signal: execution.signal,
+      },
+      method: "mutate",
+      app: "after-abort",
+    });
+    setTimeout(() => execution.abort(), 200);
+    await assert.rejects(pending, /cancelled|stale execution/);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    await assert.rejects(readFile(marker), /ENOENT/, "A cancelled method cannot leave an orphan process behind");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

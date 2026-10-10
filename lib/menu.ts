@@ -5,15 +5,13 @@
  */
 
 import {
-  createTelegramModelMenuStateBuilder,
+  createTelegramMenuDelivery,
   handleTelegramModelMenuCallbackAction,
   openTelegramModelMenu,
   sendTelegramModelMenuMessage,
   updateTelegramModelMenuMessage,
   type TelegramMenuMessageRuntimeDeps,
   type TelegramModelMenuState,
-  type TelegramModelMenuStateBuilderContext,
-  type TelegramModelMenuStateBuilderDeps,
   type TelegramReplyMarkup,
 } from "./menu-model.ts";
 import {
@@ -30,16 +28,21 @@ import {
 import {
   type MenuModel,
   type ScopedTelegramModel,
+  type TelegramModelSwitchContinuationSource,
   type ThinkingLevel,
 } from "./model.ts";
-import type { TelegramInputRichMessage } from "./telegram-api.ts";
 import {
   handleTelegramSectionCallback,
   handleTelegramSectionOpen,
   handleTelegramSectionSettingsOpen,
   parseTelegramSectionCallback,
+  type TelegramSectionRuntimeDeps,
   type TelegramSectionRegistry,
 } from "./sections.ts";
+import type {
+  TelegramApiCallOptions,
+  TelegramInputRichMessage,
+} from "./telegram-api.ts";
 
 export {
   applyTelegramModelPageSelection,
@@ -194,7 +197,6 @@ export interface TelegramMenuCallbackRuntimeDeps<
     text?: string,
   ) => Promise<void>;
   isIdle: (ctx: TContext) => boolean;
-  hasActiveTelegramTurn: () => boolean;
   hasAbortHandler: () => boolean;
   hasActiveToolExecutions: () => boolean;
   persistScopedModelPatterns?: (
@@ -206,10 +208,12 @@ export interface TelegramMenuCallbackRuntimeDeps<
   stagePendingModelSwitch: (
     selection: ScopedTelegramModel<TModel>,
     ctx: TContext,
+    continuationTurn: TelegramModelSwitchContinuationSource,
   ) => void;
   restartInterruptedTelegramTurn: (
     selection: ScopedTelegramModel<TModel>,
     ctx: TContext,
+    continuationTurn: TelegramModelSwitchContinuationSource,
   ) => Promise<boolean> | boolean;
   sectionRegistry?: TelegramSectionRegistry;
   editInteractiveMessage?: (
@@ -253,6 +257,7 @@ export interface TelegramMenuActionRuntimeDeps<
   getActiveModel: (ctx: TContext) => TModel | undefined;
   getThinkingLevel: () => ThinkingLevel;
   getQueueItemCount?: () => number;
+  getPendingCancellationCount?: () => number;
   buildStatusHtml: (ctx: TContext) => string;
   storeModelMenuState: (state: TelegramModelMenuState<TModel>) => void;
   isIdle: (ctx: TContext) => boolean;
@@ -264,6 +269,7 @@ export interface TelegramMenuActionRuntimeDeps<
     options?: {
       target?: { chatId: number; threadId?: number };
       parseMode?: "HTML";
+      assertAuthority?: TelegramApiCallOptions["assertAuthority"];
     },
   ) => Promise<unknown>;
   sectionRegistry?: TelegramSectionRegistry;
@@ -291,79 +297,22 @@ export interface TelegramMenuActionRuntime<
     replyToMessageId: number,
     ctx: TContext,
     threadId?: number,
+    options?: Pick<TelegramApiCallOptions, "assertAuthority">,
   ) => Promise<void>;
   openModelMenu: (
     chatId: number,
     replyToMessageId: number,
     ctx: TContext,
     threadId?: number,
+    options?: Pick<TelegramApiCallOptions, "assertAuthority">,
   ) => Promise<void>;
   openThinkingMenu: (
     chatId: number,
     replyToMessageId: number,
     ctx: TContext,
+    threadId?: number,
+    options?: Pick<TelegramApiCallOptions, "assertAuthority">,
   ) => Promise<void>;
-}
-
-export type TelegramMenuCallbackAction =
-  | { kind: "ignore" }
-  | { kind: "status"; action: "model" | "thinking" | "queue" | "settings" }
-  | { kind: "thinking:set"; level: string }
-  | {
-      kind: "model";
-      action:
-        | "noop"
-        | "scope"
-        | "page"
-        | "pages"
-        | "open"
-        | "pick"
-        | "pick-selected"
-        | "scope-enable"
-        | "scope-disable"
-        | "scope-toggle";
-      value?: string;
-    };
-
-export function parseTelegramMenuCallbackAction(
-  data: string | undefined,
-): TelegramMenuCallbackAction {
-  if (data === "menu:model" || data === "status:model") {
-    return { kind: "status", action: "model" };
-  }
-  if (data === "menu:thinking" || data === "status:thinking") {
-    return { kind: "status", action: "thinking" };
-  }
-  if (data === "menu:queue" || data === "status:queue") {
-    return { kind: "status", action: "queue" };
-  }
-  if (data === "menu:settings" || data === "status:settings") {
-    return { kind: "status", action: "settings" };
-  }
-  if (data?.startsWith("thinking:set:")) {
-    return {
-      kind: "thinking:set",
-      level: data.slice("thinking:set:".length),
-    };
-  }
-  if (data?.startsWith("model:")) {
-    const [, action, value] = data.split(":");
-    if (
-      action === "noop" ||
-      action === "scope" ||
-      action === "page" ||
-      action === "pages" ||
-      action === "open" ||
-      action === "pick" ||
-      action === "pick-selected" ||
-      action === "scope-enable" ||
-      action === "scope-disable" ||
-      action === "scope-toggle"
-    ) {
-      return { kind: "model", action, value };
-    }
-  }
-  return { kind: "ignore" };
 }
 
 export async function handleTelegramMenuCallbackEntry(
@@ -379,7 +328,7 @@ export async function handleTelegramMenuCallbackEntry(
   if (!state) {
     await deps.answerCallbackQuery(
       callbackQueryId,
-      "Interactive message expired.",
+      "Interactive message expired",
     );
     return;
   }
@@ -419,84 +368,15 @@ export async function handleStoredTelegramMenuCallback<
   });
 }
 
-export interface TelegramMenuCallbackRuntimeAdapterDeps<
+export type TelegramMenuCallbackRuntimeAdapterDeps<
   TContext,
   TModel extends MenuModel = MenuModel,
-> {
-  getStoredModelMenuState: (
-    messageId: number | undefined,
-    chatId?: number,
-  ) => TelegramModelMenuState<TModel> | undefined;
-  getActiveModel: (ctx: TContext) => TModel | undefined;
-  getThinkingLevel: () => ThinkingLevel;
-  setThinkingLevel: (level: ThinkingLevel) => void;
-  updateStatus: (ctx: TContext, error?: string) => void;
-  updateModelMenuMessage: (
-    state: TelegramModelMenuState<TModel>,
-    ctx: TContext,
-  ) => Promise<void>;
-  updateThinkingMenuMessage: (
-    state: TelegramModelMenuState<TModel>,
-    ctx: TContext,
-  ) => Promise<void>;
-  updateStatusMessage: (
-    state: TelegramModelMenuState<TModel>,
-    ctx: TContext,
-  ) => Promise<void>;
-  updateSettingsMenuMessage?: (
-    state: TelegramModelMenuState<TModel>,
-    ctx: TContext,
-  ) => Promise<void>;
-  answerCallbackQuery: (
-    callbackQueryId: string,
-    text?: string,
-  ) => Promise<void>;
-  isIdle: (ctx: TContext) => boolean;
-  hasActiveTelegramTurn: () => boolean;
-  hasAbortHandler: () => boolean;
+> = Omit<
+  TelegramMenuCallbackRuntimeDeps<TContext, TModel>,
+  "hasActiveToolExecutions"
+> & {
   getActiveToolExecutions: () => number;
-  persistScopedModelPatterns?: (
-    patterns: string[],
-    ctx: TContext,
-  ) => Promise<void>;
-  setModel: (model: TModel) => Promise<boolean>;
-  setCurrentModel: (model: TModel, ctx: TContext) => void;
-  stagePendingModelSwitch: (
-    selection: ScopedTelegramModel<TModel>,
-    ctx: TContext,
-  ) => void;
-  restartInterruptedTelegramTurn: (
-    selection: ScopedTelegramModel<TModel>,
-    ctx: TContext,
-  ) => Promise<boolean> | boolean;
-  sectionRegistry?: TelegramSectionRegistry;
-  editInteractiveMessage?: (
-    chatId: number,
-    messageId: number,
-    text: string,
-    mode: "markdown" | "html" | "plain",
-    replyMarkup: TelegramReplyMarkup,
-  ) => Promise<void>;
-  sendInteractiveMessage?: (
-    chatId: number,
-    text: string,
-    mode: "markdown" | "html" | "plain",
-    replyMarkup: TelegramReplyMarkup,
-    options?: { target?: { chatId: number; threadId?: number } },
-  ) => Promise<number | undefined>;
-  sendSectionRichMessage?: (
-    chatId: number,
-    message: TelegramInputRichMessage,
-    options?: { target?: { chatId: number; threadId?: number } },
-  ) => Promise<number | undefined>;
-  enqueueSectionPrompt?: (
-    prompt: string,
-    ctx: TContext,
-    target?: { chatId: number; threadId?: number },
-    source?: unknown,
-  ) => Promise<void>;
-  deleteMessage?: (chatId: number, messageId: number) => Promise<void>;
-}
+};
 
 export function createTelegramMenuCallbackHandler<
   TQuery extends MenuCallbackQuery,
@@ -515,32 +395,10 @@ export function createTelegramMenuCallbackHandlerForContext<
 >(
   deps: TelegramMenuCallbackRuntimeAdapterDeps<TContext, TModel>,
 ): (query: TQuery, ctx: TContext) => Promise<void> {
+  const { getActiveToolExecutions, ...ports } = deps;
   return createTelegramMenuCallbackHandler<TQuery, TContext, TModel>({
-    getStoredModelMenuState: deps.getStoredModelMenuState,
-    getActiveModel: deps.getActiveModel,
-    getThinkingLevel: deps.getThinkingLevel,
-    setThinkingLevel: deps.setThinkingLevel,
-    updateStatus: deps.updateStatus,
-    updateModelMenuMessage: deps.updateModelMenuMessage,
-    updateThinkingMenuMessage: deps.updateThinkingMenuMessage,
-    updateStatusMessage: deps.updateStatusMessage,
-    updateSettingsMenuMessage: deps.updateSettingsMenuMessage,
-    answerCallbackQuery: deps.answerCallbackQuery,
-    isIdle: deps.isIdle,
-    hasActiveTelegramTurn: deps.hasActiveTelegramTurn,
-    hasAbortHandler: deps.hasAbortHandler,
-    hasActiveToolExecutions: () => deps.getActiveToolExecutions() > 0,
-    persistScopedModelPatterns: deps.persistScopedModelPatterns,
-    setModel: deps.setModel,
-    setCurrentModel: deps.setCurrentModel,
-    stagePendingModelSwitch: deps.stagePendingModelSwitch,
-    restartInterruptedTelegramTurn: deps.restartInterruptedTelegramTurn,
-    sectionRegistry: deps.sectionRegistry,
-    editInteractiveMessage: deps.editInteractiveMessage,
-    sendInteractiveMessage: deps.sendInteractiveMessage,
-    sendSectionRichMessage: deps.sendSectionRichMessage,
-    enqueueSectionPrompt: deps.enqueueSectionPrompt,
-    deleteMessage: deps.deleteMessage,
+    ...ports,
+    hasActiveToolExecutions: () => getActiveToolExecutions() > 0,
   });
 }
 
@@ -559,7 +417,7 @@ export async function handleTelegramMenuCallbackRuntime<
       query.message?.chat?.id,
     );
     if (!state) {
-      await deps.answerCallbackQuery(query.id, "Interactive message expired.");
+      await deps.answerCallbackQuery(query.id, "Interactive message expired");
       return;
     }
     await deps.updateStatusMessage(state, ctx);
@@ -581,12 +439,30 @@ export async function handleTelegramMenuCallbackRuntime<
           : undefined;
       if (typeof chatId === "number" && typeof messageId === "number") {
         const { token, action, payload } = parsed;
+        const sectionDeps: TelegramSectionRuntimeDeps = {
+          answerCallbackQuery: deps.answerCallbackQuery,
+          target,
+          editInteractiveMessage:
+            deps.editInteractiveMessage ?? (async () => {}),
+          sendInteractiveMessage:
+            deps.sendInteractiveMessage ?? (async () => undefined),
+          sendRichMessage:
+            deps.sendSectionRichMessage ??
+            (async () => {
+              throw new Error("Rich Message delivery is unavailable");
+            }),
+          enqueuePrompt: deps.enqueueSectionPrompt
+            ? (prompt: string) =>
+                deps.enqueueSectionPrompt!(prompt, ctx, target, query)
+            : async () => {},
+          deleteMessage: deps.deleteMessage ?? (async () => {}),
+        };
         if (action === "open") {
           const state = deps.getStoredModelMenuState(messageId, chatId);
           if (!state) {
             await deps.answerCallbackQuery(
               query.id,
-              "Interactive message expired.",
+              "Interactive message expired",
             );
             return;
           }
@@ -596,51 +472,19 @@ export async function handleTelegramMenuCallbackRuntime<
             chatId,
             messageId,
             query.id,
-            {
-              answerCallbackQuery: deps.answerCallbackQuery,
-              target,
-              editInteractiveMessage:
-                deps.editInteractiveMessage ?? (async () => {}),
-              sendInteractiveMessage:
-                deps.sendInteractiveMessage ?? (async () => undefined),
-              sendRichMessage: deps.sendSectionRichMessage ?? (async () => {
-                throw new Error("Rich Message delivery is unavailable");
-              }),
-              enqueuePrompt: deps.enqueueSectionPrompt
-                ? (prompt: string) =>
-                    deps.enqueueSectionPrompt!(prompt, ctx, target, query)
-                : async () => {},
-              deleteMessage: deps.deleteMessage ?? (async () => {}),
-            },
+            sectionDeps,
           );
           if (handled) return;
         } else if (action === "settings") {
-          if (typeof chatId === "number" && typeof messageId === "number") {
-            const handled = await handleTelegramSectionSettingsOpen(
-              deps.sectionRegistry,
-              token,
-              chatId,
-              messageId,
-              query.id,
-              {
-                answerCallbackQuery: deps.answerCallbackQuery,
-                target,
-                editInteractiveMessage:
-                  deps.editInteractiveMessage ?? (async () => {}),
-                sendInteractiveMessage:
-                  deps.sendInteractiveMessage ?? (async () => undefined),
-                sendRichMessage: deps.sendSectionRichMessage ?? (async () => {
-                  throw new Error("Rich Message delivery is unavailable");
-                }),
-                enqueuePrompt: deps.enqueueSectionPrompt
-                  ? (prompt: string) =>
-                      deps.enqueueSectionPrompt!(prompt, ctx, target, query)
-                  : async () => {},
-                deleteMessage: deps.deleteMessage ?? (async () => {}),
-              },
-            );
-            if (handled) return;
-          }
+          const handled = await handleTelegramSectionSettingsOpen(
+            deps.sectionRegistry,
+            token,
+            chatId,
+            messageId,
+            query.id,
+            sectionDeps,
+          );
+          if (handled) return;
         } else {
           const handled = await handleTelegramSectionCallback(
             deps.sectionRegistry,
@@ -650,22 +494,7 @@ export async function handleTelegramMenuCallbackRuntime<
             chatId,
             messageId,
             query.id,
-            {
-              answerCallbackQuery: deps.answerCallbackQuery,
-              target,
-              editInteractiveMessage:
-                deps.editInteractiveMessage ?? (async () => {}),
-              sendInteractiveMessage:
-                deps.sendInteractiveMessage ?? (async () => undefined),
-              sendRichMessage: deps.sendSectionRichMessage ?? (async () => {
-                throw new Error("Rich Message delivery is unavailable");
-              }),
-              enqueuePrompt: deps.enqueueSectionPrompt
-                ? (prompt: string) =>
-                    deps.enqueueSectionPrompt!(prompt, ctx, target, query)
-                : async () => {},
-              deleteMessage: deps.deleteMessage ?? (async () => {}),
-            },
+            sectionDeps,
           );
           if (handled) return;
         }
@@ -700,7 +529,8 @@ export async function handleTelegramMenuCallbackRuntime<
             deps.updateStatus(ctx);
           },
           getCurrentThinkingLevel: deps.getThinkingLevel,
-          updateStatusMessage: () => deps.updateStatusMessage(state, ctx),
+          updateThinkingMenuMessage: () =>
+            deps.updateThinkingMenuMessage(state, ctx),
           answerCallbackQuery: deps.answerCallbackQuery,
           isVoiceReplyActive: deps.isVoiceReplyActive,
         },
@@ -715,8 +545,7 @@ export async function handleTelegramMenuCallbackRuntime<
             activeModel: deps.getActiveModel(ctx),
             currentThinkingLevel: deps.getThinkingLevel(),
             isIdle: deps.isIdle(ctx),
-            canRestartBusyRun:
-              deps.hasActiveTelegramTurn() && deps.hasAbortHandler(),
+            canRestartBusyRun: deps.hasAbortHandler(),
             hasActiveToolExecutions: deps.hasActiveToolExecutions(),
           },
           {
@@ -733,11 +562,15 @@ export async function handleTelegramMenuCallbackRuntime<
               deps.setThinkingLevel(level);
               deps.updateStatus(ctx);
             },
-            stagePendingModelSwitch: (selection) => {
-              deps.stagePendingModelSwitch(selection, ctx);
+            stagePendingModelSwitch: (selection, continuationTurn) => {
+              deps.stagePendingModelSwitch(selection, ctx, continuationTurn);
             },
-            restartInterruptedTelegramTurn: (selection) =>
-              deps.restartInterruptedTelegramTurn(selection, ctx),
+            restartInterruptedTelegramTurn: (selection, continuationTurn) =>
+              deps.restartInterruptedTelegramTurn(
+                selection,
+                ctx,
+                continuationTurn,
+              ),
           },
         );
       } catch (error) {
@@ -747,44 +580,6 @@ export async function handleTelegramMenuCallbackRuntime<
       }
     },
     answerCallbackQuery: deps.answerCallbackQuery,
-  });
-}
-
-export interface TelegramMenuActionRuntimeWithStateBuilderDeps<
-  TModel extends MenuModel = MenuModel,
-  TContext extends TelegramModelMenuStateBuilderContext<TModel> =
-    TelegramModelMenuStateBuilderContext<TModel>,
->
-  extends
-    Omit<TelegramMenuActionRuntimeDeps<TContext, TModel>, "getModelMenuState">,
-    TelegramModelMenuStateBuilderDeps<TModel, TContext> {
-  isVoiceReplyActive?: () => boolean;
-}
-
-export function createTelegramMenuActionRuntimeWithStateBuilder<
-  TModel extends MenuModel = MenuModel,
-  TContext extends TelegramModelMenuStateBuilderContext<TModel> =
-    TelegramModelMenuStateBuilderContext<TModel>,
->(
-  deps: TelegramMenuActionRuntimeWithStateBuilderDeps<TModel, TContext>,
-): TelegramMenuActionRuntime<TContext, TModel> {
-  return createTelegramMenuActionRuntime({
-    getModelMenuState: createTelegramModelMenuStateBuilder({
-      runtime: deps.runtime,
-      createSettingsManager: deps.createSettingsManager,
-      getActiveModel: deps.getActiveModel,
-    }),
-    getActiveModel: deps.getActiveModel,
-    getThinkingLevel: deps.getThinkingLevel,
-    getQueueItemCount: deps.getQueueItemCount,
-    buildStatusHtml: deps.buildStatusHtml,
-    storeModelMenuState: deps.storeModelMenuState,
-    isIdle: deps.isIdle,
-    canOfferInFlightModelSwitch: deps.canOfferInFlightModelSwitch,
-    sendTextReply: deps.sendTextReply,
-    editInteractiveMessage: deps.editInteractiveMessage,
-    sendInteractiveMessage: deps.sendInteractiveMessage,
-    sectionRegistry: deps.sectionRegistry,
   });
 }
 
@@ -814,16 +609,28 @@ export function createTelegramMenuActionRuntime<
         deps.getQueueItemCount?.() ?? 0,
         deps.sectionRegistry,
         deps.isVoiceReplyActive?.(),
+        deps.getPendingCancellationCount?.() ?? 0,
       ),
-    sendStatusMessage: (chatId, replyToMessageId, ctx, threadId) =>
-      openTelegramStatusMenu({
+    sendStatusMessage: (chatId, replyToMessageId, ctx, threadId, options) => {
+      const delivery = createTelegramMenuDelivery(
+        { chatId, threadId },
+        options,
+        deps,
+      );
+      return openTelegramStatusMenu({
         isIdle: () => deps.isIdle(ctx),
         sendBusyMessage: async () => {
           await deps.sendTextReply(
             chatId,
             replyToMessageId,
             "<b>⏳ Cannot open status while Pi is busy. Send /abort, /next, or /stop.</b>",
-            { target: { chatId, threadId }, parseMode: "HTML" },
+            {
+              target: { chatId, threadId },
+              parseMode: "HTML",
+              ...(delivery.assertAuthority
+                ? { assertAuthority: delivery.assertAuthority }
+                : {}),
+            },
           );
         },
         getModelMenuState: () => deps.getModelMenuState(chatId, ctx, threadId),
@@ -843,15 +650,26 @@ export function createTelegramMenuActionRuntime<
             statusHtml,
             activeModel,
             thinkingLevel,
-            deps,
+            {
+              ...deps,
+              sendInteractiveMessage: delivery.sendInteractiveMessage,
+            },
             queueItemCount,
             deps.sectionRegistry,
             deps.isVoiceReplyActive?.(),
+            deps.getPendingCancellationCount?.() ?? 0,
           ),
-        storeModelMenuState: deps.storeModelMenuState,
-      }),
-    openModelMenu: (chatId, replyToMessageId, ctx, threadId) =>
-      openTelegramModelMenu({
+        storeModelMenuState: delivery.storeModelMenuState,
+      });
+    },
+    openModelMenu: (chatId, replyToMessageId, ctx, threadId, options) => {
+      const delivery = createTelegramMenuDelivery(
+        { chatId, threadId },
+        options,
+        deps,
+      );
+      const assertAuthority = delivery.assertAuthority;
+      return openTelegramModelMenu({
         isIdle: () => deps.isIdle(ctx),
         canOfferInFlightModelSwitch: () =>
           deps.canOfferInFlightModelSwitch(ctx),
@@ -860,7 +678,11 @@ export function createTelegramMenuActionRuntime<
             chatId,
             replyToMessageId,
             "<b>⏳ Cannot switch model while Pi is busy. Send /abort, /next, or /stop.</b>",
-            { target: { chatId, threadId }, parseMode: "HTML" },
+            {
+              target: { chatId, threadId },
+              parseMode: "HTML",
+              ...(assertAuthority ? { assertAuthority } : {}),
+            },
           );
         },
         sendNoModelsMessage: async () => {
@@ -868,24 +690,38 @@ export function createTelegramMenuActionRuntime<
             chatId,
             replyToMessageId,
             "<b>🚫 No available models with configured auth.</b>",
-            { target: { chatId, threadId }, parseMode: "HTML" },
+            {
+              target: { chatId, threadId },
+              parseMode: "HTML",
+              ...(assertAuthority ? { assertAuthority } : {}),
+            },
           );
         },
         getModelMenuState: () => deps.getModelMenuState(chatId, ctx, threadId),
         getActiveModel: () => deps.getActiveModel(ctx),
         sendModelMenu: (state, activeModel) =>
-          sendTelegramModelMenuMessage(state, activeModel, deps),
-        storeModelMenuState: deps.storeModelMenuState,
-      }),
-    openThinkingMenu: (chatId, _replyToMessageId, ctx) =>
-      openTelegramThinkingMenu({
-        getModelMenuState: () => deps.getModelMenuState(chatId, ctx),
+          sendTelegramModelMenuMessage(state, activeModel, {
+            ...deps,
+            sendInteractiveMessage: delivery.sendInteractiveMessage,
+          }),
+        storeModelMenuState: delivery.storeModelMenuState,
+      });
+    },
+    openThinkingMenu: (chatId, _replyToMessageId, ctx, threadId, options) => {
+      const delivery = createTelegramMenuDelivery(
+        { chatId, threadId },
+        options,
+        deps,
+      );
+      return openTelegramThinkingMenu({
+        getModelMenuState: () => deps.getModelMenuState(chatId, ctx, threadId),
         getActiveModel: () => deps.getActiveModel(ctx),
         getThinkingLevel: deps.getThinkingLevel,
-        storeModelMenuState: deps.storeModelMenuState,
+        storeModelMenuState: delivery.storeModelMenuState,
         editInteractiveMessage: deps.editInteractiveMessage,
-        sendInteractiveMessage: deps.sendInteractiveMessage,
+        sendInteractiveMessage: delivery.sendInteractiveMessage,
         isVoiceReplyActive: deps.isVoiceReplyActive,
-      }),
+      });
+    },
   };
 }

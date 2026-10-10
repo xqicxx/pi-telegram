@@ -7,12 +7,11 @@
 import { buildTelegramTableBlock } from "./rich-blocks.ts";
 import { splitTelegramStatusCard } from "./status.ts";
 import { formatTelegramCommandEmojiPrefix } from "./commands.ts";
+import { refuseUnavailableTelegramThinkingControls } from "./menu-thinking.ts";
 import {
-  getTelegramSectionMainMenuRows,
-  type TelegramSectionRegistry,
-} from "./sections.ts";
-import {
+  editTelegramMenuMessage,
   formatStatusButtonLabel,
+  sendTelegramMenuMessage,
   type TelegramMenuMessageRuntimeDeps,
   type TelegramMenuRenderPayload,
   type TelegramModelMenuState,
@@ -23,6 +22,10 @@ import {
   type MenuModel,
   type ThinkingLevel,
 } from "./model.ts";
+import {
+  getTelegramSectionMainMenuRows,
+  type TelegramSectionRegistry,
+} from "./sections.ts";
 
 export interface TelegramStatusMenuCallbackDeps {
   updateModelMenuMessage: () => Promise<void>;
@@ -62,46 +65,6 @@ function isTelegramStatusMenuCallbackAction(
   return data === `menu:${action}` || data === `status:${action}`;
 }
 
-function applyTelegramMenuRenderPayload(
-  state: TelegramModelMenuState,
-  payload: TelegramMenuRenderPayload,
-): TelegramMenuRenderPayload {
-  state.mode = payload.nextMode;
-  return payload;
-}
-
-async function editTelegramMenuMessage(
-  state: TelegramModelMenuState,
-  payload: TelegramMenuRenderPayload,
-  deps: TelegramMenuMessageRuntimeDeps,
-): Promise<void> {
-  const appliedPayload = applyTelegramMenuRenderPayload(state, payload);
-  await deps.editInteractiveMessage(
-    state.chatId,
-    state.messageId,
-    appliedPayload.text,
-    appliedPayload.mode,
-    appliedPayload.replyMarkup,
-  );
-}
-
-function sendTelegramMenuMessage(
-  state: TelegramModelMenuState,
-  payload: TelegramMenuRenderPayload,
-  deps: TelegramMenuMessageRuntimeDeps,
-): Promise<number | undefined> {
-  const appliedPayload = applyTelegramMenuRenderPayload(state, payload);
-  return deps.sendInteractiveMessage(
-    state.chatId,
-    appliedPayload.text,
-    appliedPayload.mode,
-    appliedPayload.replyMarkup,
-    state.threadId === undefined
-      ? undefined
-      : { target: { chatId: state.chatId, threadId: state.threadId } },
-  );
-}
-
 export async function openTelegramStatusMenu<
   TModel extends MenuModel = MenuModel,
 >(deps: TelegramStatusMenuOpenDeps<TModel>): Promise<void> {
@@ -137,20 +100,14 @@ export async function handleTelegramStatusMenuCallbackAction(
     return true;
   }
   if (!isTelegramStatusMenuCallbackAction(data, "thinking")) return false;
-  if (deps.isVoiceReplyActive?.()) {
-    await deps.answerCallbackQuery(
+  if (
+    await refuseUnavailableTelegramThinkingControls(
       callbackQueryId,
-      "Thinking controls are disabled during voice replies.",
-    );
+      activeModel,
+      deps,
+    )
+  )
     return true;
-  }
-  if (!activeModel?.reasoning) {
-    await deps.answerCallbackQuery(
-      callbackQueryId,
-      "This model has no reasoning controls.",
-    );
-    return true;
-  }
   await deps.updateThinkingMenuMessage();
   await deps.answerCallbackQuery(callbackQueryId);
   return true;
@@ -162,6 +119,7 @@ export function buildStatusReplyMarkup(
   queueItemCount = 0,
   sectionRegistry?: TelegramSectionRegistry,
   isVoiceReplyActive?: boolean,
+  pendingCancellationCount = 0,
 ): TelegramReplyMarkup {
   const rows: Array<Array<{ text: string; callback_data: string }>> = [];
   rows.push([
@@ -190,6 +148,13 @@ export function buildStatusReplyMarkup(
       callback_data: "menu:queue",
     },
   ]);
+  if (pendingCancellationCount > 0)
+    rows.push([
+      {
+        text: `❌ Pending cancellations: ${pendingCancellationCount}`,
+        callback_data: "reroutecancel:review:open",
+      },
+    ]);
   if (sectionRegistry) {
     const sectionRows = getTelegramSectionMainMenuRows(sectionRegistry);
     for (const row of sectionRows) {
@@ -212,6 +177,7 @@ export function buildTelegramStatusMenuRenderPayload(
   queueItemCount = 0,
   sectionRegistry?: TelegramSectionRegistry,
   isVoiceReplyActive?: boolean,
+  pendingCancellationCount = 0,
 ): TelegramMenuRenderPayload {
   // A card whose rows all match the row shape becomes a native table; anything
   // else keeps the HTML card instead of a half-parsed table.
@@ -241,6 +207,7 @@ export function buildTelegramStatusMenuRenderPayload(
       queueItemCount,
       sectionRegistry,
       isVoiceReplyActive,
+      pendingCancellationCount,
     ),
   };
 }
@@ -254,6 +221,7 @@ export async function updateTelegramStatusMessage(
   queueItemCount = 0,
   sectionRegistry?: TelegramSectionRegistry,
   isVoiceReplyActive?: boolean,
+  pendingCancellationCount = 0,
 ): Promise<void> {
   await editTelegramMenuMessage(
     state,
@@ -264,6 +232,7 @@ export async function updateTelegramStatusMessage(
       queueItemCount,
       sectionRegistry,
       isVoiceReplyActive,
+      pendingCancellationCount,
     ),
     deps,
   );
@@ -278,6 +247,7 @@ export function sendTelegramStatusMessage(
   queueItemCount = 0,
   sectionRegistry?: TelegramSectionRegistry,
   isVoiceReplyActive?: boolean,
+  pendingCancellationCount = 0,
 ): Promise<number | undefined> {
   return sendTelegramMenuMessage(
     state,
@@ -288,6 +258,7 @@ export function sendTelegramStatusMessage(
       queueItemCount,
       sectionRegistry,
       isVoiceReplyActive,
+      pendingCancellationCount,
     ),
     deps,
   );

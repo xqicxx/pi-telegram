@@ -14,6 +14,9 @@ import {
   utimes,
   writeFile,
 } from "node:fs/promises";
+import fileSystem from "node:fs/promises";
+import nativeFileSystem from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
@@ -24,6 +27,7 @@ import {
   callTelegramMultipart,
   cleanupTelegramTempFiles,
   createDefaultTelegramBridgeApiRuntime,
+  createTelegramAttachmentFileName,
   createTelegramApiClient,
   createTelegramApiTargetActivityRuntime,
   createTelegramApiTargetTrackingClient,
@@ -36,13 +40,15 @@ import {
   fetchTelegramBotIdentity,
   getTelegramApiErrorRequestTarget,
   getTelegramApiWorkspaceAdmissionScope,
-  getTelegramInboundFileByteLimitFromEnv,
+  getTelegramByteLimitFromEnv,
   isTelegramApiCommitUnknownError,
+  isTelegramApiRequestRejected,
   isTelegramMessageNotModifiedError,
   setTelegramApiHttpsFetchForTesting,
   prepareTelegramTempDir,
   TELEGRAM_FILE_MAX_BYTES,
   TelegramApiWorkspaceAdmissionError,
+  TelegramApiAuthorityError,
   type TelegramApiCallOptions,
   type TelegramApiClient,
   type TelegramInputRichMessage,
@@ -661,14 +667,14 @@ test("Outgoing Rich Message type supports explicit structured blocks", () => {
 test("Telegram API byte-limit helpers expose the inbound file default", () => {
   assert.equal(TELEGRAM_FILE_MAX_BYTES, 50 * 1024 * 1024);
   assert.equal(
-    getTelegramInboundFileByteLimitFromEnv({}, []),
+    getTelegramByteLimitFromEnv({}, [], TELEGRAM_FILE_MAX_BYTES),
     TELEGRAM_FILE_MAX_BYTES,
   );
 });
 
 test("Telegram API byte-limit config prefers positive integer env values", () => {
   assert.equal(
-    getTelegramInboundFileByteLimitFromEnv(
+    getTelegramByteLimitFromEnv(
       { PI_TELEGRAM_INBOUND_FILE_MAX_BYTES: "12345" },
       ["PI_TELEGRAM_INBOUND_FILE_MAX_BYTES"],
       99,
@@ -676,7 +682,7 @@ test("Telegram API byte-limit config prefers positive integer env values", () =>
     12345,
   );
   assert.equal(
-    getTelegramInboundFileByteLimitFromEnv(
+    getTelegramByteLimitFromEnv(
       {
         PI_TELEGRAM_INBOUND_FILE_MAX_BYTES: "0",
         TELEGRAM_MAX_FILE_SIZE_BYTES: "bad",
@@ -770,7 +776,7 @@ test("Telegram bridge API runtime owns reply-markup edits", async () => {
   ]);
 });
 
-test("Telegram bridge API runtime coalesces and spaces identical chat actions", async () => {
+test("Telegram bridge API runtime coalesces identical actions and suppresses concurrent chat peers", async () => {
   let nowMs = 1000;
   let releaseFirst: (value: boolean) => void = () => {};
   const firstResult = new Promise<boolean>((resolve) => {
@@ -801,7 +807,11 @@ test("Telegram bridge API runtime coalesces and spaces identical chat actions", 
 
   const first = runtime.call<boolean>("sendChatAction", body);
   const joined = runtime.call<boolean>("sendChatAction", body);
-  await Promise.resolve();
+  const suppressed = runtime.call<boolean>("sendChatAction", {
+    ...body,
+    message_thread_id: 9,
+  });
+  assert.equal(await suppressed, true);
   assert.equal(calls, 1);
   releaseFirst(true);
   assert.deepEqual(await Promise.all([first, joined]), [true, true]);
@@ -852,7 +862,7 @@ test("Telegram bridge API runtime bounds active chat-action gates", async () => 
   assert.deepEqual(calls, ["1", "2", "3"]);
 });
 
-test("Telegram bridge API runtime shares retry-after suppression for chat actions", async () => {
+test("Telegram bridge API runtime shares retry-after suppression across one chat", async () => {
   let nowMs = 1000;
   let calls = 0;
   const events: Array<Record<string, unknown>> = [];
@@ -878,7 +888,12 @@ test("Telegram bridge API runtime shares retry-after suppression for chat action
       now: () => nowMs,
       chatActionMinIntervalMs: 2000,
     });
-    const body = { chat_id: 7, action: "typing" };
+    const body = {
+      chat_id: 7,
+      message_thread_id: 11,
+      action: "typing",
+    };
+    const peerThreadBody = { ...body, message_thread_id: 12 };
 
     assert.equal(await runtime.call<boolean>("sendChatAction", body), true);
     assert.equal(calls, 1);
@@ -890,12 +905,33 @@ test("Telegram bridge API runtime shares retry-after suppression for chat action
       },
     ]);
 
-    nowMs = 3999;
-    assert.equal(await runtime.call<boolean>("sendChatAction", body), true);
+    nowMs = 2000;
+    assert.equal(
+      await runtime.call<boolean>("sendChatAction", peerThreadBody),
+      true,
+    );
     assert.equal(calls, 1);
-    nowMs = 4000;
-    assert.equal(await runtime.call<boolean>("sendChatAction", body), true);
+    assert.equal(
+      await runtime.call<boolean>("sendChatAction", {
+        ...peerThreadBody,
+        chat_id: 8,
+      }),
+      true,
+    );
     assert.equal(calls, 2);
+
+    nowMs = 3999;
+    assert.equal(
+      await runtime.call<boolean>("sendChatAction", peerThreadBody),
+      true,
+    );
+    assert.equal(calls, 2);
+    nowMs = 4000;
+    assert.equal(
+      await runtime.call<boolean>("sendChatAction", peerThreadBody),
+      true,
+    );
+    assert.equal(calls, 3);
   } finally {
     restoreFetch();
   }
@@ -1054,33 +1090,39 @@ test("Telegram API helper fetches bot identity through IPv4 fallback", async () 
   }
 });
 
-test("Telegram temp cleanup removes only stale UUID-prefixed scratch files", async () => {
+test("Telegram temp cleanup removes stale attachment files by age and keeps directories", async () => {
   const tempDir = await mkdtemp(join(tmpdir(), "pi-telegram-cleanup-"));
-  const oldFile = join(
-    tempDir,
-    "00000000-0000-4000-8000-000000000001-old.txt",
-  );
-  const freshFile = join(
-    tempDir,
-    "00000000-0000-4000-8000-000000000002-fresh.txt",
-  );
-  const journalFile = join(tempDir, "inbox.json");
+  const oldFile = join(tempDir, "voice-mybot-1.ogg");
+  const stalePart = join(tempDir, "voice-mybot-2.ogg.00000000-0000-4000-8000-000000000001.part");
+  const freshFile = join(tempDir, "voice-mybot-3.ogg");
   const nestedDir = join(tempDir, "nested");
   await writeFile(oldFile, "old", "utf8");
+  await writeFile(stalePart, "partial", "utf8");
   await writeFile(freshFile, "fresh", "utf8");
-  await writeFile(journalFile, "durable", "utf8");
   await mkdir(nestedDir);
   await writeFile(join(nestedDir, "keep.txt"), "keep", "utf8");
   await utimes(oldFile, new Date(1_000), new Date(1_000));
-  await utimes(journalFile, new Date(1_000), new Date(1_000));
+  await utimes(stalePart, new Date(1_000), new Date(1_000));
   await utimes(freshFile, new Date(10_000), new Date(10_000));
-  assert.equal(await cleanupTelegramTempFiles(tempDir, 5_000, 11_000), 1);
-  assert.deepEqual((await readdir(tempDir)).sort(), [
-    "00000000-0000-4000-8000-000000000002-fresh.txt",
-    "inbox.json",
-    "nested",
-  ]);
+  assert.equal(await cleanupTelegramTempFiles(tempDir, 5_000, 11_000), 2);
+  assert.deepEqual((await readdir(tempDir)).sort(), ["nested", "voice-mybot-3.ogg"]);
 });
+
+for (const [name, source, scope, expected] of [
+  ["private chat uses the bot username", { kind: "voice", messageId: 174576, chat: { id: 7, type: "private" } }, "@my_bot", "voice-my_bot-174576.ogg"],
+  ["private chat falls back to the bot id", { kind: "voice", messageId: 4, chat: { id: 7, type: "private" } }, "8502475096", "voice-8502475096-4.ogg"],
+  ["public group uses its username", { kind: "photo", messageId: 9, chat: { id: -1001, type: "supergroup", username: "Team_Chat" } }, "@my_bot", "photo-Team_Chat-9.ogg"],
+  ["anonymous group uses its unsigned id with a single dash", { kind: "photo", messageId: 9, chat: { id: -1001234567890, type: "supergroup" } }, "@my_bot", "photo-1001234567890-9.ogg"],
+  ["titles never name files", { kind: "voice", messageId: 1, chat: { id: -5, type: "group" } }, "@my_bot", "voice-5-1.ogg"],
+  ["rich message index", { kind: "photo", messageId: 2, index: 3, chat: { id: 7, type: "private" } }, "mybot", "photo-mybot-2-3.ogg"],
+  ["sender file names stay a readable suffix", { kind: "document", messageId: 6, userFileName: "my report?.pdf", chat: { id: 7, type: "private" } }, "mybot", "document-mybot-6-my_report_.pdf"],
+  ["unknown chat and scope omit the segment", { kind: "voice", messageId: 8 }, undefined, "voice-8.ogg"],
+] as const) {
+  test(`Attachment names are kind-scope-messageId without UUIDs (${name})`, () => {
+    assert.equal(createTelegramAttachmentFileName(source, "generated.ogg", scope), expected);
+    assert.doesNotMatch(expected, /--|[0-9a-f]{8}-[0-9a-f]{4}-/u);
+  });
+}
 
 test("Telegram temp preparation creates the directory and removes stale scratch files", async () => {
   const parentDir = await mkdtemp(
@@ -1134,6 +1176,245 @@ test("Telegram API helpers include HTTP status details for failed responses", as
     restoreFetch();
   }
 });
+
+for (const surface of ["helper", "client", "direct", "bus-direct", "default-direct", "default-bus"] as const) {
+  for (const boundary of ["current", "entry", "response", "parsing", "replacement"] as const) {
+    test(`Typed callback authority ${surface} preserves its captured recipient (${boundary})`, async () => {
+      let current = boundary !== "entry", calls = 0;
+      const events: unknown[] = [], bodies: unknown[] = [];
+      const options: Pick<TelegramApiCallOptions, "assertAuthority"> = {
+        assertAuthority() { if (!current) throw new Error("recipient replaced with secret fixture context"); },
+      };
+      const restoreFetch = setApiTestFetch(async (_input, init) => {
+        calls++;
+        bodies.push(JSON.parse(String(init?.body)));
+        const response = createApiJsonResponse(true);
+        if (boundary === "response" || boundary === "replacement") {
+          await Promise.resolve(); current = false;
+          if (boundary === "replacement") options.assertAuthority = () => {};
+        } else if (boundary === "parsing") {
+          response.text = async () => { await Promise.resolve(); current = false; return JSON.stringify({ ok: true, result: true }); };
+        }
+        return response;
+      });
+      const client = createTelegramApiClient(() => "123:abc");
+      const direct = createTelegramBridgeApiRuntime({ client, tempDir: "/unused", maxFileSizeBytes: 1,
+        tempFileMaxAgeMs: 1, recordRuntimeEvent(_kind, error) { events.push(error); } });
+      const bus = createTelegramBusAwareApiRuntime({ directRuntime: direct, ownsDirect: () => true,
+        callFollowerApi: async () => assert.fail("Direct callback authority never crosses IPC") });
+      const defaultDirect = createDefaultTelegramBridgeApiRuntime({ getBotToken: () => "123:abc",
+        targetActivity: createTelegramApiTargetActivityRuntime(),
+        recordRuntimeEvent(_kind, error) { events.push(error); } });
+      const defaultBus = createTelegramBusAwareApiRuntime({ directRuntime: defaultDirect, ownsDirect: () => true,
+        callFollowerApi: async () => assert.fail("Default direct callback authority never crosses IPC") });
+      try {
+        const request = surface === "helper" ? answerTelegramCallbackQuery("123:abc", "captured-query", "✅ Saved", options)
+          : (surface === "client" ? client : surface === "direct" ? direct : surface === "bus-direct" ? bus
+            : surface === "default-direct" ? defaultDirect : defaultBus)
+            .answerCallbackQuery("captured-query", "✅ Saved", options);
+        if (boundary === "current") await request;
+        else await assert.rejects(request, (error: unknown) => {
+          assert.ok(error instanceof TelegramApiAuthorityError);
+          assert.equal(error.requestIssued, boundary !== "entry");
+          assert.doesNotMatch(error.message, /secret fixture context/);
+          return true;
+        });
+        assert.equal(calls, boundary === "entry" ? 0 : 1, "Refused authority cannot report success or replay a toast");
+        assert.deepEqual(bodies, boundary === "entry" ? [] : [{ callback_query_id: "captured-query",
+          text: "✅ Saved" }], "A local closure is never part of the Bot API body");
+        if (surface !== "helper" && surface !== "client" && boundary !== "current") {
+          assert.equal(events.length, 1);
+          assert.ok(events[0] instanceof TelegramApiAuthorityError, "The direct owner still records the refusal");
+        }
+      } finally { restoreFetch(); }
+    });
+  }
+}
+
+test("Typed callback authority captures its guard before the client token observation", async () => {
+  let current = true, calls = 0;
+  const options: Pick<TelegramApiCallOptions, "assertAuthority"> = {
+    assertAuthority() { if (!current) throw new Error("Original recipient lost"); },
+  };
+  const client = createTelegramApiClient(() => { current = false; options.assertAuthority = () => {}; return "123:abc"; });
+  const restoreFetch = setApiTestFetch(async () => { calls++; return createApiJsonResponse(true); });
+  try {
+    await assert.rejects(client.answerCallbackQuery("captured-query", "Saved", options),
+      { name: "TelegramApiAuthorityError", requestIssued: false });
+    assert.equal(calls, 0);
+  } finally { restoreFetch(); }
+});
+
+for (const guarded of [false, true]) {
+  test(`Typed callback authority retains best-effort nonauthority failure diagnostics (guarded=${guarded})`, async () => {
+    let calls = 0;
+    const events: unknown[] = [];
+    const runtime = createDefaultTelegramBridgeApiRuntime({ getBotToken: () => "123:abc",
+      recordRuntimeEvent(_kind, error) { events.push(error); } });
+    const restoreFetch = setApiTestFetch(async () => { calls++; return createApiErrorResponse(400, "Query expired"); });
+    try {
+      await runtime.answerCallbackQuery("captured-query", "Saved", guarded ? { assertAuthority() {} } : undefined);
+      assert.equal(calls, 1);
+      assert.equal(events.length, 1, "The existing diagnostic owner records once without retrying");
+      assert.ok(events[0] instanceof Error);
+      assert.match(events[0].message, /Query expired/);
+    } finally { restoreFetch(); }
+  });
+}
+
+for (const boundary of ["entry", "encoding"] as const) {
+  test(`Per-call API authority refuses JSON ${boundary} loss before issuance`, async () => {
+    let current = boundary !== "entry", calls = 0;
+    const restoreFetch = setApiTestFetch(async () => { calls++; return createApiJsonResponse(true); });
+    try {
+      await assert.rejects(callTelegram("123:abc", "sendMessage", {
+        chat_id: 7, message_thread_id: 42,
+        toJSON() { current = false; return { chat_id: 7, message_thread_id: 42 }; },
+      }, { assertAuthority() { if (!current) throw createSyntheticFetchFailure(); } }),
+      { name: "TelegramApiAuthorityError", requestIssued: false });
+      assert.equal(calls, 0);
+    } finally { restoreFetch(); }
+  });
+}
+
+for (const boundary of ["transport", "parsing"] as const) {
+  test(`Per-call API authority refuses acknowledged success after ${boundary} loss`, async () => {
+    let current = true, calls = 0, sleeps = 0;
+    const restoreFetch = setApiTestFetch(async () => {
+      calls++;
+      const response = createApiJsonResponse(true);
+      if (boundary === "transport") { await Promise.resolve(); current = false; }
+      else response.text = async () => { await Promise.resolve(); current = false; return JSON.stringify({ ok: true, result: true }); };
+      return response;
+    });
+    try {
+      const error = await callTelegram("123:abc", "editMessageText", { chat_id: 7, message_thread_id: 42 }, {
+        assertAuthority() { if (!current) throw createSyntheticFetchFailure(); },
+        sleep: async () => { sleeps++; },
+      }).catch((error: unknown) => error);
+      assert.ok(error instanceof TelegramApiAuthorityError);
+      assert.equal(error.requestIssued, true);
+      assert.equal(isTelegramApiCommitUnknownError(error), false);
+      assert.equal(isTelegramApiRequestRejected(error, "editMessageText"), false);
+      assert.equal(getTelegramApiErrorRequestTarget(error), undefined, "Authority refusal is not stale-target evidence.");
+      assert.equal(calls, 1);
+      assert.equal(sleeps, 0);
+    } finally { restoreFetch(); }
+  });
+}
+
+test("Per-call API authority captures its guard before asynchronous response work", async () => {
+  let current = true, calls = 0;
+  const options: TelegramApiCallOptions = { assertAuthority() { if (!current) throw new Error("recipient replaced"); } };
+  const restoreFetch = setApiTestFetch(async () => {
+    calls++;
+    await Promise.resolve();
+    current = false;
+    options.assertAuthority = () => {};
+    return createApiJsonResponse(true);
+  });
+  try {
+    await assert.rejects(callTelegram("123:abc", "sendMessage", {}, options),
+      { name: "TelegramApiAuthorityError", requestIssued: true });
+    assert.equal(calls, 1);
+  } finally { restoreFetch(); }
+});
+
+for (const status of [429, 503]) {
+  test(`Per-call API authority loss during HTTP ${status} wait cannot reissue`, async () => {
+    let current = true, calls = 0, sleeps = 0;
+    const restoreFetch = setApiTestFetch(async () => { calls++; return createApiErrorResponse(status, "rejected"); });
+    try {
+      await assert.rejects(callTelegram("123:abc", status === 429 ? "sendMessage" : "editMessageText", {}, {
+        assertAuthority() { if (!current) throw new Error("recipient replaced"); },
+        sleep: async () => { sleeps++; await Promise.resolve(); current = false; },
+      }), { name: "TelegramApiAuthorityError", requestIssued: true });
+      assert.equal(calls, 1);
+      assert.equal(sleeps, 1);
+    } finally { restoreFetch(); }
+  });
+}
+
+for (const revoke of [false, true]) {
+  test(`Per-call API authority ${revoke ? "refuses revoked" : "permits current"} IPv4 fallback`, async () => {
+    let current = true, calls = 0, fallbackCalls = 0;
+    const restoreEnv = setApiTestNetworkFamily("ipv4-fallback");
+    const restoreFetch = setApiTestFetch(async () => { calls++; current = !revoke; throw createSyntheticFetchFailure(); });
+    const restoreHttpsFetch = setTelegramApiHttpsFetchForTesting(async () => { fallbackCalls++; return createApiJsonResponse(true); });
+    try {
+      const request = callTelegram("123:abc", "editMessageText", {}, {
+        maxAttempts: 1, assertAuthority() { if (!current) throw createSyntheticFetchFailure(); },
+      });
+      if (revoke) await assert.rejects(request, { name: "TelegramApiAuthorityError", requestIssued: true });
+      else assert.equal(await request, true);
+      assert.equal(calls, 1);
+      assert.equal(fallbackCalls, revoke ? 0 : 1);
+    } finally { restoreHttpsFetch(); restoreFetch(); restoreEnv(); }
+  });
+}
+
+for (const boundary of ["entry", "blob", "encoding"] as const) {
+  test(`Per-call API authority refuses multipart ${boundary} loss before issuance`, async () => {
+    let current = boundary !== "entry", opens = 0, calls = 0;
+    const originalOpen = nativeFileSystem.openAsBlob;
+    const options: TelegramApiCallOptions = { assertAuthority() { if (!current) throw createSyntheticFetchFailure(); } };
+    const restoreEnv = setApiTestNetworkFamily("ipv4");
+    const restoreHttpsFetch = setTelegramApiHttpsFetchForTesting(async () => { calls++; return createApiJsonResponse(true); });
+    nativeFileSystem.openAsBlob = async () => {
+      opens++;
+      await Promise.resolve();
+      if (boundary === "blob") current = false;
+      options.assertAuthority = () => {};
+      const blob = new Blob(["selected recipient data"]);
+      const arrayBuffer = blob.arrayBuffer.bind(blob);
+      blob.arrayBuffer = async () => { const result = await arrayBuffer(); current = false; return result; };
+      return blob;
+    };
+    syncBuiltinESMExports();
+    try {
+      await assert.rejects(callTelegramMultipart("123:abc", "sendDocument", { chat_id: "7" },
+        "document", "/not-a-real-file", "fixture.txt", options),
+      { name: "TelegramApiAuthorityError", requestIssued: false });
+      assert.equal(opens, boundary === "entry" ? 0 : 1);
+      assert.equal(calls, 0);
+    } finally {
+      nativeFileSystem.openAsBlob = originalOpen;
+      syncBuiltinESMExports();
+      restoreHttpsFetch(); restoreEnv();
+    }
+  });
+}
+
+for (const revoke of [false, true]) {
+  test(`Per-call API authority survives actual client activity/Workspace adapters with ${revoke ? "revoked" : "current"} recipient`, async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pi-telegram-api-authority-"));
+    let current = true, calls = 0, observedLease = false;
+    const ledger = createTelegramWorkspaceAdmissionLedger({ path: join(dir, "admission.json"), profileKey: "profile:api-authority",
+      owner: { processId: process.pid, processBirthId: `${process.pid}:api-authority` }, getProcessLiveness: () => "alive" });
+    const activity = createTelegramApiTargetActivityRuntime();
+    const restoreFetch = setApiTestFetch(async () => {
+      calls++;
+      observedLease = ledger.read().leases.length === 1;
+      assert.equal(activity.hasPendingTarget({ chatId: 7, threadId: 42 }), true);
+      return createApiJsonResponse({ message_id: 17 });
+    });
+    const client = createTelegramApiTargetTrackingClient(createTelegramApiWorkspaceAdmissionClient(createTelegramApiClient(() => "123:abc"), {
+      acquireAdmission(input) { const result = ledger.acquireAdmission(input); current = !revoke; return result; },
+      releaseAdmission: ledger.releaseAdmission,
+    }), activity);
+    try {
+      const request = client.call("sendMessage", { chat_id: 7, message_thread_id: 42, text: "menu" }, {
+        assertAuthority() { if (!current) throw new Error("recipient replaced"); },
+      });
+      if (revoke) await assert.rejects(request, { name: "TelegramApiAuthorityError", requestIssued: false });
+      else assert.deepEqual(await request, { message_id: 17 });
+      assert.equal(calls, revoke ? 0 : 1);
+      assert.equal(observedLease, !revoke);
+      assert.deepEqual(ledger.read().leases, []);
+      assert.equal(activity.hasPendingTarget({ chatId: 7, threadId: 42 }), false);
+    } finally { restoreFetch(); await rm(dir, { recursive: true, force: true }); }
+  });
+}
 
 test("Non-idempotent Telegram API calls retry explicit 429 but report 5xx commit unknown", async () => {
   const sleeps: number[] = [];
@@ -1581,7 +1862,7 @@ test("Telegram multipart 5xx reports commit unknown without replay", async () =>
   }
 });
 
-test("Telegram file downloads use unique sanitized temp file names", async () => {
+test("Telegram file downloads use deterministic sanitized names published by rename", async () => {
   const tempDir = await mkdtemp(join(tmpdir(), "pi-telegram-download-"));
   const restoreFetch = setApiTestFetch(async (input) => {
     const url = getApiTestFetchUrl(input);
@@ -1597,8 +1878,9 @@ test("Telegram file downloads use unique sanitized temp file names", async () =>
       "bad name?.txt",
       tempDir,
     );
-    assert.match(path, /[0-9a-f-]{36}-bad_name_\.txt$/);
+    assert.equal(path, join(tempDir, "bad_name_.txt"));
     assert.equal(await readFile(path, "utf8"), "hello");
+    assert.deepEqual(await readdir(tempDir), ["bad_name_.txt"], "no partial file remains after publication");
     if (process.platform !== "win32") {
       assert.equal((await stat(tempDir)).mode & 0o777, 0o700);
       assert.equal((await stat(path)).mode & 0o777, 0o600);
@@ -1736,6 +2018,72 @@ test("Default Telegram bridge API runtime binds lazy token client and defaults",
   }
 });
 
+test("Workspace deletion requires executor authority and never retries transport or ambiguous success", async () => {
+  let requests = 0;
+  let outcome: "success" | "false" | "absent" | "network" = "success";
+  const previousFamily = process.env.PI_TELEGRAM_NETWORK_FAMILY;
+  process.env.PI_TELEGRAM_NETWORK_FAMILY = "ipv4-fallback";
+  const restoreFetch = setApiTestFetch(async (input) => {
+    requests++;
+    assert.match(getApiTestFetchUrl(input), /deleteForumTopic$/);
+    if (outcome === "network") throw Object.assign(new Error("connection reset"), { code: "ECONNRESET" });
+    if (outcome === "absent") return createApiErrorResponse(400, "Bad Request: message thread not found");
+    return createApiJsonResponse(outcome === "success");
+  });
+  const runtime = createDefaultTelegramBridgeApiRuntime({
+    getBotToken: () => "123:abc", recordRuntimeEvent() {},
+    workspaceAdmission: { acquireAdmission: () => ({ kind: "blocked", reason: "retirement-fenced" }),
+      releaseAdmission: () => { throw new Error("no ordinary lease"); } },
+  });
+  const authorize = () => ({ chatId: 7, threadId: 42 });
+  try {
+    await assert.rejects(runtime.call("deleteForumTopic", { chat_id: 7, message_thread_id: 42 }), /unavailable/);
+    await assert.rejects(runtime.deleteWorkspaceThread(() => { throw new Error("stale permit"); }), /stale permit/);
+    assert.equal(requests, 0);
+    await runtime.deleteWorkspaceThread(authorize);
+    assert.equal(requests, 1);
+    outcome = "false";
+    await assert.rejects(runtime.deleteWorkspaceThread(authorize), /not confirmed/);
+    assert.equal(requests, 2);
+    outcome = "absent";
+    await assert.rejects(runtime.deleteWorkspaceThread(authorize), (error) =>
+      error instanceof Error && "status" in error && error.status === 400);
+    assert.equal(requests, 3);
+    outcome = "network";
+    await assert.rejects(runtime.deleteWorkspaceThread(authorize));
+    assert.equal(requests, 4);
+  } finally {
+    restoreFetch();
+    if (previousFamily === undefined) delete process.env.PI_TELEGRAM_NETWORK_FAMILY;
+    else process.env.PI_TELEGRAM_NETWORK_FAMILY = previousFamily;
+  }
+});
+
+test("Request rejection requires matching method and parsed Telegram no-effect response evidence", async () => {
+  for (const [status, code, ok, rejected] of [
+    [400, 400, false, true], [401, 401, false, true], [403, 403, false, true],
+    [404, 404, false, true], [429, 429, false, true], [408, 408, false, false],
+    [500, 500, false, false], [429, 400, false, false], [429, "429", false, false],
+    [429, 429, true, false], [429, undefined, false, false],
+  ] as const) {
+    const restore = setApiTestFetch(async () => new Response(JSON.stringify({
+      ok, error_code: code, description: "fixture rejection",
+    }), { status }));
+    try {
+      const api = createDefaultTelegramBridgeApiRuntime({ getBotToken: () => "123:fixture", recordRuntimeEvent() {} });
+      await assert.rejects(api.deleteWorkspaceThread(() => ({ chatId: 7, threadId: 42 })), error => {
+        assert.equal(isTelegramApiRequestRejected(error, "deleteForumTopic"), rejected);
+        assert.equal(isTelegramApiRequestRejected(error, "sendMessage"), false);
+        assert.equal(isTelegramApiRequestRejected(error, undefined as unknown as string), false);
+        return true;
+      });
+    } finally { restore(); }
+  }
+  assert.equal(isTelegramApiRequestRejected(Object.assign(new Error("rejected"), {
+    status: 429, rejectedRequestMethod: "deleteForumTopic",
+  }), "deleteForumTopic"), false);
+});
+
 test("Default Telegram bridge API runtime applies optional Workspace admission", async () => {
   let activeLease:
     | {
@@ -1789,7 +2137,7 @@ test("Default Telegram bridge API runtime applies optional Workspace admission",
 test("Default Telegram bridge API runtime honors PI_CODING_AGENT_DIR for temp files", async () => {
   const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
   const agentDir = await mkdtemp(join(tmpdir(), "pi-telegram-agent-dir-"));
-  const tempDir = resolve(agentDir, "tmp", "telegram");
+  const tempDir = resolve(agentDir, "tmp", "pi-telegram", "attachments");
   process.env.PI_CODING_AGENT_DIR = agentDir;
   try {
     const runtime = createDefaultTelegramBridgeApiRuntime({
@@ -1824,6 +2172,105 @@ test("Telegram bridge API runtime prepares its configured temp directory", async
   });
   assert.equal(await runtime.prepareTempDir(), 1);
   assert.deepEqual(await readdir(tempDir), []);
+});
+
+test("Telegram bridge API runtime names attachments from their source and the live bot scope", async () => {
+  const names: string[] = [];
+  let scope: string | undefined = "@my_bot";
+  const runtime = createTelegramBridgeApiRuntime({
+    tempDir: "/tmp/pi-telegram/attachments",
+    maxFileSizeBytes: 123,
+    tempFileMaxAgeMs: 60_000,
+    getBotScope: () => scope,
+    recordRuntimeEvent: () => {},
+    client: createApiRuntimeClient({
+      downloadFile: async (_fileId, suggestedName) => { names.push(suggestedName); return `/tmp/${suggestedName}`; },
+    }),
+  });
+  await runtime.downloadFile("a", "voice-1.ogg", { kind: "voice", messageId: 1, chat: { id: 7, type: "private" } });
+  scope = "8502475096";
+  await runtime.downloadFile("b", "voice-1.ogg", { kind: "voice", messageId: 1, chat: { id: 7, type: "private" } });
+  await runtime.downloadFile("c", "voice-1.ogg", { kind: "voice", messageId: 1, chat: { id: -1009, type: "supergroup", username: "team" } });
+  await runtime.downloadFile("d", "legacy.bin");
+  assert.deepEqual(names, ["voice-my_bot-1.ogg", "voice-8502475096-1.ogg", "voice-team-1.ogg", "legacy.bin"]);
+});
+
+test("Download publication bounds Windows sharing retries without refetching or hiding failure", async (t) => {
+  const scenarios = [
+    { platform: "win32", code: "EPERM", mode: "transient", attempts: 3 },
+    { platform: "win32", code: "EACCES", mode: "transient", attempts: 3 },
+    { platform: "win32", code: "EPERM", mode: "permanent", attempts: 6 },
+    { platform: "linux", code: "EPERM", mode: "permanent", attempts: 1 },
+    { platform: "win32", code: "ENOENT", mode: "permanent", attempts: 1 },
+    { platform: "win32", code: "EPERM", mode: "cancel", attempts: 1 },
+  ] as const;
+  for (const scenario of scenarios) {
+    const tempDir = await mkdtemp(join(tmpdir(), "pi-telegram-download-sharing-"));
+    const targetPath = join(tempDir, "voice-bot-9.ogg");
+    await writeFile(targetPath, "previous complete payload");
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    const realRename = fileSystem.rename;
+    const controller = new AbortController();
+    const cancellation = new Error("Download cancelled during publication retry");
+    const failure = Object.assign(new Error("File publication denied"), { code: scenario.code });
+    let renameCalls = 0;
+    const requests: string[] = [];
+    const restoreFetch = setApiTestFetch(async (input) => {
+      const url = getApiTestFetchUrl(input);
+      requests.push(url.includes("/getFile") ? "metadata" : "content");
+      if (url.includes("/getFile")) return createApiJsonResponse({ file_path: "files/demo" });
+      return new Response("new complete payload", { status: 200 });
+    });
+    const renameMock = t.mock.method(fileSystem, "rename", async (...[source, target]: Parameters<typeof realRename>) => {
+      renameCalls++;
+      assert.equal(target, targetPath);
+      assert.equal(await readFile(source, "utf8"), "new complete payload", "Only a complete part may be republished");
+      if (scenario.mode === "transient" && renameCalls > 2) return realRename(source, target);
+      if (scenario.mode === "cancel") setImmediate(() => controller.abort(cancellation));
+      throw failure;
+    });
+    Object.defineProperty(process, "platform", { ...platform, value: scenario.platform });
+    syncBuiltinESMExports();
+    try {
+      const operation = downloadTelegramFile("123:abc", "file-id", "voice-bot-9.ogg", tempDir,
+        { signal: controller.signal });
+      if (scenario.mode === "transient") {
+        assert.equal(await operation, targetPath);
+        assert.equal(await readFile(targetPath, "utf8"), "new complete payload");
+      } else {
+        await assert.rejects(operation, (error) => error === (scenario.mode === "cancel" ? cancellation : failure));
+        assert.equal(await readFile(targetPath, "utf8"), "previous complete payload");
+      }
+      if (scenario.mode === "transient") assert.ok(renameCalls >= scenario.attempts && renameCalls <= 6);
+      else assert.equal(renameCalls, scenario.attempts);
+      assert.deepEqual(requests, ["metadata", "content"], "Publication retry must not replay HTTP");
+      assert.deepEqual(await readdir(tempDir), ["voice-bot-9.ogg"], "Part cleanup also runs after exhaustion/cancellation");
+    } finally {
+      renameMock.mock.restore();
+      syncBuiltinESMExports();
+      Object.defineProperty(process, "platform", platform);
+      restoreFetch();
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  }
+});
+
+test("Concurrent downloads of one message publish one complete file", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "pi-telegram-download-race-"));
+  const restoreFetch = setApiTestFetch(async (input) => {
+    const url = getApiTestFetchUrl(input);
+    if (url.includes("/getFile")) return createApiJsonResponse({ file_path: "files/demo" });
+    return new Response("complete payload", { status: 200 });
+  });
+  try {
+    const paths = await Promise.all([1, 2, 3].map(() => downloadTelegramFile("123:abc", "file-id", "voice-bot-9.ogg", tempDir)));
+    assert.deepEqual(new Set(paths), new Set([join(tempDir, "voice-bot-9.ogg")]));
+    assert.equal(await readFile(paths[0]!, "utf8"), "complete payload");
+    assert.deepEqual(await readdir(tempDir), ["voice-bot-9.ogg"], "no partial file remains");
+  } finally {
+    restoreFetch();
+    await rm(tempDir, { recursive: true, force: true });
+  }
 });
 
 test("Telegram bridge API runtime records structured failures", async () => {

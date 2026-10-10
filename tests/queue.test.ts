@@ -4,6 +4,7 @@
  */
 
 import assert from "node:assert/strict";
+
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -69,15 +70,14 @@ import {
   executeTelegramQueueDispatchPlan,
   formatQueuedTelegramItemsStatus,
   getNextTelegramToolExecutionCount,
-  getTelegramQueueItemAdmissionMode,
   getTelegramQueueLaneContract,
   handleTelegramAgentEndRuntime,
   handleTelegramAgentStartRuntime,
   handleTelegramToolExecutionEndRuntime,
   handleTelegramToolExecutionStartRuntime,
   isTelegramQueueItemAdmissionValid,
-  isTelegramQueueItemDurablyAdmitted,
   partitionTelegramQueueItemsForHistory,
+  observeTelegramTargetQueueWork,
   planNextTelegramQueueAction,
   planTelegramPromptEnqueue,
   removeTelegramQueueItemByReceipt,
@@ -136,6 +136,26 @@ function createQueueTestControlItem<TContext = unknown>(
   };
 }
 
+test("Live target queue work partitions current captured namespaces without resolving fallback targets", () => {
+  const target = { chatId: 7, threadId: 10 };
+  const cases = [
+    { item: { chatId: 7, target }, protected: true, unknown: false },
+    { item: { chatId: 7, target: { chatId: 7, threadId: 42 } }, protected: false, unknown: false },
+    { item: { chatId: 8, target: { chatId: 8, threadId: 10 } }, protected: false, unknown: false },
+    { item: { chatId: 7 }, protected: false, unknown: true },
+    { item: { chatId: 8 }, protected: false, unknown: false },
+    { item: { chatId: 7, target: { chatId: 8, threadId: 10 } }, protected: false, unknown: true },
+    { item: { chatId: 7, target: { chatId: 7, threadId: 0 } }, protected: false, unknown: true },
+  ];
+  for (const { item, ...expected } of cases) {
+    const before = structuredClone(item);
+    assert.deepEqual(observeTelegramTargetQueueWork(target, item, []), expected);
+    assert.deepEqual(observeTelegramTargetQueueWork(target, undefined, [item]), expected);
+    assert.deepEqual(item, before);
+  }
+  assert.deepEqual(observeTelegramTargetQueueWork(target, undefined, []), { protected: false, unknown: false });
+  assert.equal(observeTelegramTargetQueueWork({ ...target, threadId: 0 }, undefined, []).unknown, true);
+});
 test("Queue store owns queued item state helpers", () => {
   const item: PendingTelegramTurn = createQueueTestPromptTurn({
     queueOrder: 3,
@@ -230,8 +250,17 @@ test("Active turn store owns active turn state helpers", () => {
   assert.deepEqual(store.getTarget(), { chatId: 7, threadId: 70 });
   assert.equal(store.getReplyToMessageId(), 8);
   assert.deepEqual(store.getSourceMessageIds(), [8, 9]);
+  const storedTurn = store.get();
+  assert.equal(store.markNextAbortAnnouncement(), true);
+  assert.equal(store.get(), storedTurn);
+  assert.equal(store.get()?.announceNextAbortOnEnd, true);
+  assert.equal(store.clearNextAbortAnnouncement(), true);
+  assert.equal(store.get(), storedTurn);
+  assert.equal(store.get()?.announceNextAbortOnEnd, undefined);
+  assert.equal(store.clearNextAbortAnnouncement(), false);
   store.clear();
   assert.equal(store.has(), false);
+  assert.equal(store.markNextAbortAnnouncement(), false);
   assert.equal(store.getChatId(), undefined);
   assert.equal(store.getTarget(), undefined);
 });
@@ -317,7 +346,7 @@ test("Queue lane contracts define admission modes and dispatch order", () => {
   );
   assert.equal(getTelegramQueueLaneContract("priority").dispatchRank, 1);
   assert.equal(
-    getTelegramQueueItemAdmissionMode({ queueLane: "control" }),
+    getTelegramQueueLaneContract("control").admissionMode,
     "control-queue",
   );
   assert.equal(
@@ -802,6 +831,42 @@ test("Control-lane items sort before priority and default prompt items", () => {
   );
 });
 
+for (const mode of ["waiting", "dispatched-head", "behind-dispatched-head", "unknown-dispatch", "missing-settlement", "settlement-failure", "positive"] as const) {
+  test(`Continuation reactions cancel only waiting source-owned control prompts (${mode})`, () => {
+    const continuation = createQueueTestPromptTurn({ chatId: 100, replyToMessageId: 12, sourceMessageIds: [12],
+      queueOrder: 2, queueLane: "control", laneOrder: 1, statusSummary: "continue", admissionReceipts: [{ queueKind: "prompt", receiptId: "continue-12", sourceUpdateIds: [1] }] });
+    const synthetic = createQueueTestPromptTurn({ chatId: 100, sourceMessageIds: [], queueOrder: 3, queueLane: "control", laneOrder: 2, statusSummary: "model-resume" });
+    const ordinary = createQueueTestPromptTurn({ chatId: 100, replyToMessageId: 22, sourceMessageIds: [22] });
+    const before = mode === "behind-dispatched-head" ? [ordinary, continuation, synthetic] : [continuation, synthetic, ordinary];
+    let items: TelegramQueueItem<string>[] = [...before], discarded = 0;
+    const mutation = createTelegramQueueMutationController<string>({
+      getQueuedItems: () => items, setQueuedItems: next => { items = next; }, updateStatus() {},
+      ...(mode === "unknown-dispatch" ? {} : { hasPendingDispatch: () => mode === "dispatched-head" || mode === "behind-dispatched-head" }),
+      ...(mode === "missing-settlement" ? {} : { onItemsDiscarded(removed: readonly TelegramQueueItem<string>[]) {
+        assert.deepEqual(removed, [continuation]);
+        assert.deepEqual(items, before, "Durable settlement precedes memory removal");
+        if (mode === "settlement-failure") throw new Error("fixture continuation receipt unavailable");
+        discarded++;
+      } }),
+      allocateLaneOrder() { assert.fail("A continuation reaction never changes its control lane or other FIFO positions"); },
+    });
+    if (mode === "behind-dispatched-head") {
+      items = [ordinary, synthetic]; mutation.append(continuation, "ctx");
+      assert.deepEqual(items, before, "Appending a control continuation cannot displace Pi's pending head");
+    }
+    assert.equal(mutation.applyReactionByMessageId(12, { kind: "suppressed", emoji: "👎" }, "ctx", { chatId: 200 }), false);
+    const reaction = mode === "positive" ? { kind: "priority" as const, emoji: "👍" } : { kind: "suppressed" as const, emoji: "👎" };
+    if (mode === "settlement-failure") assert.throws(() => mutation.applyReactionByMessageId(12, reaction, "ctx", { chatId: 100 }), /receipt unavailable/);
+    else assert.equal(mutation.applyReactionByMessageId(12, reaction, "ctx", { chatId: 100 }), mode === "waiting" || mode === "behind-dispatched-head");
+    const cancelled = mode === "waiting" || mode === "behind-dispatched-head";
+    assert.deepEqual(items, cancelled ? before.filter(item => item !== continuation) : before);
+    assert.equal(discarded, cancelled ? 1 : 0);
+    if (cancelled) assert.equal(mutation.applyReactionByMessageId(12, reaction, "ctx", { chatId: 100 }), false, "Duplicate reactions do not settle again");
+    assert.equal(continuation.queueLane, "control");
+    assert.equal(continuation.reactionSuppressionEmoji, undefined);
+  });
+}
+
 test("Queue mutation helpers remove prompt items by Telegram message id", () => {
   const promptItem: TelegramQueueItem = createQueueTestPromptTurn({
     replyToMessageId: 1,
@@ -865,9 +930,10 @@ test("Queue mutation controller binds queue accessors to runtime mutations", () 
       ...promptItem,
       replyToMessageId: 12,
       sourceMessageIds: [12],
-      queueOrder: 2,
+      queueOrder: 4,
       laneOrder: 2,
       statusSummary: "appended",
+      guestQueryId: "guest-appended",
     },
     "append",
   );
@@ -895,7 +961,11 @@ test("Queue mutation controller binds queue accessors to runtime mutations", () 
   );
   assert.equal(nextLaneOrder, 9);
   assert.equal(controller.removeByMessageIds([11], "d"), 1);
-  assert.equal(controller.clear("e"), 2);
+  assert.equal(
+    controller.removeGuestPromptByQueueOrder?.(4, "guest-skip"),
+    true,
+  );
+  assert.equal(controller.clear("e"), 1);
   assert.deepEqual(queuedItems, []);
   assert.deepEqual(events, [
     "a",
@@ -904,9 +974,37 @@ test("Queue mutation controller binds queue accessors to runtime mutations", () 
     "c",
     "discard:d:prompt",
     "d",
-    "discard:e:control,appended",
+    "discard:guest-skip:appended",
+    "guest-skip",
+    "discard:e:control",
     "e",
   ]);
+});
+
+test("Queue order discard retains a guest prompt when durable settlement fails", () => {
+  const item = createQueueTestPromptTurn({
+    queueOrder: 17,
+    guestQueryId: "guest-1",
+    guestInlineMessageId: "inline-1",
+  });
+  let queuedItems: TelegramQueueItem<string>[] = [item];
+  const controller = createTelegramQueueMutationController<string>({
+    getQueuedItems: () => queuedItems,
+    setQueuedItems: (items) => {
+      queuedItems = items;
+    },
+    allocateLaneOrder: () => 1,
+    onItemsDiscarded: () => {
+      throw new Error("durable settlement failed");
+    },
+    updateStatus: () => {},
+  });
+
+  assert.throws(
+    () => controller.removeGuestPromptByQueueOrder?.(17, "ctx"),
+    /durable settlement failed/,
+  );
+  assert.deepEqual(queuedItems, [item]);
 });
 
 test("Queue clear retains live items when durable discard fails", () => {
@@ -2087,7 +2185,7 @@ test("Agent end hook does not republish a recovered answer already admitted as a
   const hook = createTelegramAgentEndHook<PendingTelegramTurn, { id: string }, unknown>({
     getActiveTurn: () => turn,
     extractAssistant: extractRunAssistantMessage,
-    isRecoveredAssistantAlreadyPublished: (assistant) => assistant.text === "preserved answer",
+    isAssistantAlreadyPublished: (assistant) => assistant.text === "preserved answer",
     getFoldQueuedPromptsIntoHistory: () => false,
     resetRuntimeState: () => events.push("reset"),
     updateStatus: () => {},
@@ -2104,6 +2202,32 @@ test("Agent end hook does not republish a recovered answer already admitted as a
     { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "preserved answer" }] },
     { role: "custom", customType: "state-flow-validation" },
     { role: "assistant", stopReason: "stop", content: [] },
+  ] }, { id: "session" });
+  assert.equal(events.includes("unexpected:reply"), false);
+  assert.equal(events.includes("unexpected:text"), false);
+});
+
+test("Agent end hook does not duplicate an ordinary answer already admitted as an intermediate reply", async () => {
+  const events: string[] = [];
+  const turn = createQueueTestPromptTurn({ chatId: 7, replyToMessageId: 11 });
+  const hook = createTelegramAgentEndHook<PendingTelegramTurn, { id: string }, unknown>({
+    getActiveTurn: () => turn,
+    extractAssistant: extractRunAssistantMessage,
+    isAssistantAlreadyPublished: (assistant) => assistant.text === "same answer",
+    getFoldQueuedPromptsIntoHistory: () => false,
+    resetRuntimeState: () => events.push("reset"),
+    updateStatus: () => {},
+    dispatchNextQueuedTelegramTurn: () => events.push("dispatch"),
+    requestDeferredDispatchNextQueuedTelegramTurn: (dispatch) => dispatch({ id: "session" }),
+    clearPreview: async () => {},
+    setPreviewPendingText: () => {},
+    finalizeMarkdownPreview: async () => false,
+    sendMarkdownReply: async () => { events.push("unexpected:reply"); },
+    sendTextReply: async () => { events.push("unexpected:text"); },
+    sendQueuedAttachments: async () => { events.push("unexpected:attachment"); },
+  });
+  await hook({ messages: [
+    { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "same answer" }] },
   ] }, { id: "session" });
   assert.equal(events.includes("unexpected:reply"), false);
   assert.equal(events.includes("unexpected:text"), false);
@@ -3504,6 +3628,45 @@ test("Agent end records event when voice fallback text delivery also fails", asy
   assert.ok(events.some((e) => e.includes("voice-fallback-text")));
 });
 
+test("Agent end skips voice artifact delivery for a text-only reply plan", async () => {
+  const events: string[] = [];
+  const textDeliveries: string[] = [];
+  let artifactDeliveries = 0;
+  await handleTelegramAgentEndRuntime({
+    turn: createQueueTestPromptTurn(),
+    assistant: { text: "Plain text reply" },
+    foldQueuedPromptsIntoHistory: false,
+    resetRuntimeState: () => {},
+    updateStatus: () => {},
+    clearPreview: async () => {},
+    setPreviewPendingText: () => {},
+    finalizeMarkdownPreview: async (_chatId, markdown) => {
+      textDeliveries.push(markdown);
+      return true;
+    },
+    sendMarkdownReply: async (_chatId, _replyToMessageId, markdown) => {
+      textDeliveries.push(markdown);
+    },
+    sendTextReply: async () => {},
+    sendQueuedAttachments: async () => {},
+    planOutboundReply: (markdown) => ({ markdown }),
+    sendOutboundReplyArtifacts: async () => {
+      artifactDeliveries += 1;
+    },
+    recordRuntimeEvent: (category, error, details) => {
+      events.push(
+        `error:${category}:${(error as Error).message}:${details?.phase ?? "none"}`,
+      );
+    },
+    dispatchNextQueuedTelegramTurn: () => {
+      events.push("dispatch");
+    },
+  });
+  assert.equal(artifactDeliveries, 0);
+  assert.deepEqual(textDeliveries, ["Plain text reply"]);
+  assert.deepEqual(events, ["dispatch"]);
+});
+
 test("Agent end does not intercept when rawFinalText is whitespace only", async () => {
   let voiceArtifactsCalled = false;
   const turn: PendingTelegramTurn = {
@@ -3860,6 +4023,109 @@ test("Agent end runtime renders the operation-aborted error as HTML", async () =
   ]);
 });
 
+test("Next settlement announces an explicit aborted stop before the selected queued prompt", async () => {
+  const events: string[] = [];
+  const next = createQueueTestPromptTurn({
+    chatId: 42,
+    target: { chatId: 42, threadId: 7 },
+    replyToMessageId: 99,
+    content: [{ type: "text", text: "next prompt" }],
+  });
+  let queuedItems: TelegramQueueItem<string>[] = [next];
+  const dispatch = createTelegramQueueDispatchController<string>({
+    getQueuedItems: () => queuedItems,
+    setQueuedItems: (items) => {
+      queuedItems = items;
+      events.push(`items:${items.length}`);
+    },
+    canDispatch: () => true,
+    updateStatus: () => events.push("queue-status"),
+    sendTextReply: async (_chatId, replyToMessageId, text) => {
+      events.push(`next:${replyToMessageId}:${text}`);
+      return 100;
+    },
+    onPromptDispatchStart: () => events.push("start"),
+    sendUserMessage: () => events.push("send"),
+    onPromptDispatchFailure: () => events.push("failure"),
+  });
+  dispatch.requestNextDispatchAnnouncement();
+  await handleTelegramAgentEndRuntime({
+    turn: createQueueTestPromptTurn({
+      chatId: 42,
+      replyToMessageId: 98,
+      announceNextAbortOnEnd: true,
+    }),
+    assistant: { stopReason: "aborted" },
+    foldQueuedPromptsIntoHistory: false,
+    resetRuntimeState: () => events.push("reset"),
+    updateStatus: () => events.push("turn-status"),
+    dispatchNextQueuedTelegramTurn: () => dispatch.dispatchNext("ctx"),
+    clearPreview: async () => {
+      events.push("clear");
+    },
+    setPreviewPendingText: () => events.push("unexpected:preview"),
+    finalizeMarkdownPreview: async () => false,
+    sendMarkdownReply: async () => events.push("unexpected:markdown"),
+    sendTextReply: async (_chatId, replyToMessageId, text, options) => {
+      events.push(`stop:${replyToMessageId}:${text}:${options?.parseMode ?? "plain"}`);
+    },
+    sendQueuedAttachments: async () => {},
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(events, [
+    "reset",
+    "turn-status",
+    "clear",
+    "stop:98:<b>⏹️ This operation was aborted.</b>:HTML",
+    "queue-status",
+    "next:99:<b>⏩ Dispatching next queued turn.</b>",
+    "items:1",
+    "start",
+    "send",
+  ]);
+});
+
+for (const [label, assistant] of [
+  ["explicit aborted stop", { stopReason: "aborted" }],
+  ["legacy abort error", { stopReason: "error", errorMessage: "This operation was aborted" }],
+] as const) {
+  test(`Next settlement continues dispatch when its ${label} notice fails`, async () => {
+    const events: string[] = [];
+    await handleTelegramAgentEndRuntime({
+      turn: createQueueTestPromptTurn({ announceNextAbortOnEnd: true }),
+      assistant,
+      foldQueuedPromptsIntoHistory: false,
+      resetRuntimeState: () => events.push("reset"),
+      updateStatus: () => events.push("status"),
+      dispatchNextQueuedTelegramTurn: () => events.push("dispatch"),
+      clearPreview: async () => {
+        events.push("clear");
+      },
+      setPreviewPendingText: () => {},
+      finalizeMarkdownPreview: async () => false,
+      sendMarkdownReply: async () => {},
+      sendTextReply: async () => {
+        events.push("abort-notice");
+        throw new Error("Telegram unavailable");
+      },
+      sendQueuedAttachments: async () => {},
+      recordRuntimeEvent: (category, error, details) => {
+        events.push(
+          `${category}:${details?.phase}:${error instanceof Error ? error.message : String(error)}`,
+        );
+      },
+    });
+    assert.deepEqual(events, [
+      "reset",
+      "status",
+      "clear",
+      "abort-notice",
+      "dispatch:next-abort-announcement:Telegram unavailable",
+      "dispatch",
+    ]);
+  });
+}
+
 test("Agent end plan classifies turn outcomes correctly", () => {
   const noTurnPlan = buildTelegramAgentEndPlan({
     hasTurn: false,
@@ -3879,6 +4145,17 @@ test("Agent end plan classifies turn outcomes correctly", () => {
   assert.equal(abortedPlan.kind, "aborted");
   assert.equal(abortedPlan.shouldClearPreview, true);
   assert.equal(abortedPlan.shouldDispatchNext, false);
+  assert.equal(abortedPlan.shouldSendAbortMessage, false);
+  const nextAbortedPlan = buildTelegramAgentEndPlan({
+    hasTurn: true,
+    stopReason: "aborted",
+    foldQueuedPromptsIntoHistory: false,
+    hasFinalText: false,
+    hasQueuedAttachments: false,
+    announceNextAbortOnEnd: true,
+  });
+  assert.equal(nextAbortedPlan.shouldDispatchNext, true);
+  assert.equal(nextAbortedPlan.shouldSendAbortMessage, true);
   const errorPlan = buildTelegramAgentEndPlan({
     hasTurn: true,
     stopReason: "error",
@@ -4302,7 +4579,6 @@ test("Tool execution runtimes update counts and trigger delayed aborts", () => {
   const events: string[] = [];
   let count = 0;
   handleTelegramToolExecutionStartRuntime({
-    hasActiveTurn: () => true,
     getActiveToolExecutions: () => count,
     setActiveToolExecutions: (nextCount) => {
       count = nextCount;
@@ -4310,7 +4586,6 @@ test("Tool execution runtimes update counts and trigger delayed aborts", () => {
     },
   });
   handleTelegramToolExecutionEndRuntime({
-    hasActiveTurn: () => true,
     getActiveToolExecutions: () => count,
     setActiveToolExecutions: (nextCount) => {
       count = nextCount;
@@ -4328,7 +4603,6 @@ test("Tool execution hooks bind counter and pending model-switch abort ports", (
   let count = 0;
   const events: string[] = [];
   const hooks = createTelegramToolExecutionHooks<{ id: string }>({
-    hasActiveTurn: () => true,
     getActiveToolExecutions: () => count,
     setActiveToolExecutions: (nextCount) => {
       count = nextCount;
@@ -4344,10 +4618,9 @@ test("Tool execution hooks bind counter and pending model-switch abort ports", (
   assert.deepEqual(events, ["count:1", "count:0", "abort:ctx"]);
 });
 
-test("Tool execution count helper respects active-turn presence", () => {
+test("Tool execution count helper tracks every active agent run", () => {
   assert.equal(
     getNextTelegramToolExecutionCount({
-      hasActiveTurn: true,
       currentCount: 0,
       event: "start",
     }),
@@ -4355,7 +4628,6 @@ test("Tool execution count helper respects active-turn presence", () => {
   );
   assert.equal(
     getNextTelegramToolExecutionCount({
-      hasActiveTurn: true,
       currentCount: 1,
       event: "end",
     }),
@@ -4363,11 +4635,10 @@ test("Tool execution count helper respects active-turn presence", () => {
   );
   assert.equal(
     getNextTelegramToolExecutionCount({
-      hasActiveTurn: false,
-      currentCount: 3,
+      currentCount: 0,
       event: "end",
     }),
-    3,
+    0,
   );
 });
 
@@ -4686,6 +4957,36 @@ test("Prompt enqueue controller binds runtime ports to context", async () => {
     "dispatch:ctx",
   ]);
 });
+
+for (const boundary of ["current", "before", "prepared", "built"] as const) {
+  test(`Prompt enqueue per-call authority preserves unrelated physical queue and fold policy (${boundary})`, async () => {
+    const old = createQueueTestPromptTurn({ queueOrder: 1 });
+    const next = createQueueTestPromptTurn({ queueOrder: 2 });
+    let items: TelegramQueueItem[] = [old], fold = true, current = boundary !== "before", admitted = 0, dispatch = 0;
+    const controller = createTelegramPromptEnqueueController<number>({
+      getQueuedItems: () => items, setQueuedItems: value => { items = value; },
+      getFoldQueuedPromptsIntoHistory: () => fold, setFoldQueuedPromptsIntoHistory: value => { fold = value; },
+      hasPendingDispatch: () => false,
+      async prepareTurn() {
+        if (boundary === "prepared") current = false;
+        return history => {
+          assert.deepEqual(history, []);
+          if (boundary === "built") current = false;
+          return next;
+        };
+      }, updateStatus() {}, dispatchNextQueuedTelegramTurn() { dispatch++; },
+    });
+    const enqueue = () => controller.enqueue([2], undefined, () => { admitted++; }, {
+      preserveQueued: true, assertCurrent() { if (!current) throw new Error("Caller authority changed"); },
+    });
+    if (boundary === "current") await enqueue();
+    else await assert.rejects(enqueue, /Caller authority changed/);
+    assert.deepEqual(items, boundary === "current" ? [old, next] : [old]);
+    assert.equal(fold, true);
+    assert.equal(admitted, boundary === "current" ? 1 : 0);
+    assert.equal(dispatch, boundary === "current" ? 1 : 0);
+  });
+}
 
 test("Prompt enqueue never restores a head consumed during asynchronous construction", async () => {
   const prompts = [1, 2, 3, 4].map((id) => createQueueTestPromptTurn({
@@ -5421,6 +5722,7 @@ test("Queue dispatch controller plans prompts and reports dispatch failures", ()
 
 test("Queue dispatch announces the exact selected prompt before one dispatch", async () => {
   const events: string[] = [];
+  let noticeOptions: unknown;
   let queuedItems: TelegramQueueItem<string>[] = [createQueueTestPromptTurn({
     chatId: 42,
     target: { chatId: 42, threadId: 7 },
@@ -5436,15 +5738,20 @@ test("Queue dispatch announces the exact selected prompt before one dispatch", a
     canDispatch: () => true,
     updateStatus: () => events.push("status"),
     sendTextReply: async (chatId, replyToMessageId, text, options) => {
+      noticeOptions = options;
       events.push(`notice:${chatId}:${replyToMessageId}:${options?.target?.threadId}:${text}`);
       return 100;
     },
     onPromptDispatchStart: () => events.push("start"),
     sendUserMessage: () => events.push("send"),
     onPromptDispatchFailure: () => events.push("failure"),
+    reconcileNextDispatchAnnouncementReplyOwnership: (item) => {
+      events.push(`claim:${item.replyToMessageId}`);
+    },
   });
   controller.requestNextDispatchAnnouncement();
   controller.dispatchNext("ctx");
+  assert.deepEqual(noticeOptions, { target: { chatId: 42, threadId: 7 }, parseMode: "HTML" });
   assert.deepEqual(events, [
     "status",
     "notice:42:99:7:<b>⏩ Dispatching next queued turn.</b>",
@@ -5453,10 +5760,69 @@ test("Queue dispatch announces the exact selected prompt before one dispatch", a
   assert.deepEqual(events, [
     "status",
     "notice:42:99:7:<b>⏩ Dispatching next queued turn.</b>",
+    "claim:99",
     "items:1",
     "start",
     "send",
   ]);
+});
+
+test("Queue dispatch cancellation removes only the pending next announcement", async () => {
+  const events: string[] = [];
+  let queuedItems: TelegramQueueItem<string>[] = [createQueueTestPromptTurn()];
+  const controller = createTelegramQueueDispatchController<string>({
+    getQueuedItems: () => queuedItems,
+    setQueuedItems: (items) => {
+      queuedItems = items;
+      events.push(`items:${items.length}`);
+    },
+    canDispatch: () => true,
+    updateStatus: () => events.push("status"),
+    sendTextReply: async () => {
+      events.push("notice");
+      return 100;
+    },
+    onPromptDispatchStart: () => events.push("start"),
+    sendUserMessage: () => events.push("send"),
+    onPromptDispatchFailure: () => events.push("failure"),
+  });
+  controller.requestNextDispatchAnnouncement();
+  controller.cancelNextDispatchAnnouncement();
+  controller.dispatchNext("ctx");
+  assert.deepEqual(events, ["items:1", "start", "send"]);
+});
+
+test("Queue dispatch cancellation fences an in-flight next announcement", async () => {
+  let releaseNotice!: () => void;
+  const noticePending = new Promise<void>((resolve) => {
+    releaseNotice = resolve;
+  });
+  const events: string[] = [];
+  let queuedItems: TelegramQueueItem<string>[] = [createQueueTestPromptTurn()];
+  const controller = createTelegramQueueDispatchController<string>({
+    getQueuedItems: () => queuedItems,
+    setQueuedItems: (items) => {
+      queuedItems = items;
+      events.push(`items:${items.length}`);
+    },
+    canDispatch: () => true,
+    updateStatus: () => events.push("status"),
+    sendTextReply: async () => {
+      events.push("notice");
+      await noticePending;
+      return 100;
+    },
+    onPromptDispatchStart: () => events.push("start"),
+    sendUserMessage: () => events.push("send"),
+    onPromptDispatchFailure: () => events.push("failure"),
+  });
+  controller.requestNextDispatchAnnouncement();
+  controller.dispatchNext("ctx");
+  controller.cancelNextDispatchAnnouncement();
+  releaseNotice();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(events, ["status", "notice"]);
+  assert.equal(queuedItems.length, 1);
 });
 
 test("Queue dispatch does not start an announced prompt cleared while its notice is pending", async () => {
@@ -5723,8 +6089,7 @@ test("Queue dispatch waits for durable admission without dropping the head item"
       events.push(`items:${items.length}`);
     },
     canDispatch: () => true,
-    isQueueItemAdmissionReady: (item) =>
-      isTelegramQueueItemDurablyAdmitted(item, () => ready),
+    isQueueItemAdmissionReady: () => ready,
     updateStatus: () => events.push("status"),
     sendTextReply: async () => undefined,
     onPromptDispatchStart: () => events.push("start"),

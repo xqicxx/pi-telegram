@@ -16,6 +16,7 @@ import {
   createTelegramConfigStore,
 } from "../lib/config.ts";
 import { createTelegramQueueMenuRuntime } from "../lib/menu-queue.ts";
+import { createTelegramMenuDelivery } from "../lib/menu-model.ts";
 import {
   buildTelegramSettingsMenuReplyMarkup,
   buildTimeInjectionModeSettingsReplyMarkup,
@@ -40,7 +41,6 @@ import {
   buildThinkingMenuReplyMarkup,
   buildThinkingMenuText,
   createTelegramMenuActionRuntime,
-  createTelegramMenuActionRuntimeWithStateBuilder,
   createTelegramMenuCallbackHandler,
   createTelegramMenuCallbackHandlerForContext,
   createTelegramModelMenuRuntime,
@@ -60,7 +60,6 @@ import {
   MODEL_PAGE_MENU_TITLE,
   openTelegramModelMenu,
   openTelegramStatusMenu,
-  parseTelegramMenuCallbackAction,
   resolveCachedTelegramModelMenuInputs,
   sendTelegramModelMenuMessage,
   sendTelegramStatusMessage,
@@ -71,7 +70,40 @@ import {
   updateTelegramStatusMessage,
   updateTelegramThinkingMenuMessage,
 } from "../lib/menu.ts";
-import type { MenuModel } from "../lib/model.ts";
+import type { MenuModel, ThinkingLevel } from "../lib/model.ts";
+
+for (const revoke of [false, true]) {
+  test(`Menu delivery fence retains captured adapters and ${revoke ? "refuses" : "accepts"} replaced options`, async () => {
+    let current = true, sends = 0, stored = 0;
+    const assertAuthority = () => { if (!current) throw new Error("Private recipient"); };
+    const options = { assertAuthority }, target = { chatId: 7, threadId: 41 };
+    const deps = {
+      async sendInteractiveMessage(chatId: number, _text: string, _mode: string, _markup: unknown, supplied?: {
+        target?: { chatId: number; threadId?: number }; assertAuthority?: () => void;
+      }) {
+        sends++;
+        assert.equal(chatId, 7);
+        assert.deepEqual(supplied?.target, { chatId: 7, threadId: 41 });
+        assert.equal(supplied?.assertAuthority, assertAuthority);
+        return 99;
+      },
+      storeModelMenuState(state: TelegramModelMenuState) { stored++; assert.equal(state.threadId, 41); },
+    };
+    const delivery = createTelegramMenuDelivery(target, options, deps);
+    target.chatId = 99; target.threadId = 99; options.assertAuthority = () => {};
+    deps.sendInteractiveMessage = async () => assert.fail("Captured adapter cannot be replaced");
+    deps.storeModelMenuState = () => assert.fail("Captured state publisher cannot be replaced");
+    current = !revoke;
+    const send = delivery.sendInteractiveMessage(99, "menu", "html", { inline_keyboard: [] });
+    if (revoke) await assert.rejects(send, { name: "TelegramApiAuthorityError", requestIssued: false });
+    else {
+      assert.equal(await send, 99);
+      delivery.storeModelMenuState({ chatId: 7, threadId: 41, messageId: 99, mode: "status", page: 0,
+        scope: "all", scopedModels: [], allModels: [] });
+    }
+    assert.deepEqual([sends, stored], revoke ? [0, 0] : [1, 1]);
+  });
+}
 import type { TelegramQueueItem } from "../lib/queue.ts";
 import { createTelegramExtensionSectionRegistry } from "../lib/sections.ts";
 
@@ -364,7 +396,7 @@ test("Menu helpers expose UI constants", () => {
   assert.equal(TELEGRAM_MODEL_PAGE_SIZE, 6);
 });
 
-test("Menu helpers build model menu state and parse callback actions", () => {
+test("Menu helpers build model menu state", () => {
   const modelA = createMenuModel("openai", "gpt-5", true);
   const modelB = createMenuModel("anthropic", "claude-3", false);
   const state = buildTelegramModelMenuState({
@@ -377,39 +409,6 @@ test("Menu helpers build model menu state and parse callback actions", () => {
   assert.equal(state.chatId, 1);
   assert.equal(state.scope, "all");
   assert.match(state.note ?? "", /No CLI scoped models matched/);
-  assert.deepEqual(parseTelegramMenuCallbackAction("menu:model"), {
-    kind: "status",
-    action: "model",
-  });
-  assert.deepEqual(parseTelegramMenuCallbackAction("status:model"), {
-    kind: "status",
-    action: "model",
-  });
-  assert.deepEqual(parseTelegramMenuCallbackAction("menu:queue"), {
-    kind: "status",
-    action: "queue",
-  });
-  assert.deepEqual(parseTelegramMenuCallbackAction("status:queue"), {
-    kind: "status",
-    action: "queue",
-  });
-  assert.deepEqual(parseTelegramMenuCallbackAction("thinking:set:high"), {
-    kind: "thinking:set",
-    level: "high",
-  });
-  assert.deepEqual(parseTelegramMenuCallbackAction("model:pick:2"), {
-    kind: "model",
-    action: "pick",
-    value: "2",
-  });
-  assert.deepEqual(parseTelegramMenuCallbackAction("model:pages"), {
-    kind: "model",
-    action: "pages",
-    value: undefined,
-  });
-  assert.deepEqual(parseTelegramMenuCallbackAction("unknown"), {
-    kind: "ignore",
-  });
 });
 
 test("Menu helpers apply menu mutations and resolve model selections", () => {
@@ -626,7 +625,7 @@ test("Menu helpers build model callback plans for paging, page menu, selection, 
       canRestartBusyRun: false,
       hasActiveToolExecutions: false,
     }),
-    { kind: "answer", text: "Pi is busy. Send /abort, /next, or /stop." },
+    { kind: "answer", text: "Pi is busy. Send /abort, /next, or /stop" },
   );
 });
 
@@ -957,7 +956,7 @@ test("Menu helpers route callback entry states before action handlers", async ()
   );
   assert.deepEqual(events, [
     "answer:",
-    "answer:Interactive message expired.",
+    "answer:Interactive message expired",
     "status",
   ]);
 });
@@ -1008,7 +1007,7 @@ test("Menu helpers route stored callback queries through matching action handler
     "get:2",
     "status:2",
     "get:none",
-    "answer:Interactive message expired.",
+    "answer:Interactive message expired",
   ]);
 });
 
@@ -1052,7 +1051,6 @@ test("Menu runtime routes stored callback queries through callback action ports"
         events.push(`answer:${text ?? ""}`);
       },
       isIdle: (ctx) => ctx.idle,
-      hasActiveTelegramTurn: () => true,
       hasAbortHandler: () => true,
       hasActiveToolExecutions: () => false,
       setModel: async (nextModel) => {
@@ -1089,7 +1087,7 @@ test("Menu runtime routes stored callback queries through callback action ports"
         events.push("unexpected:model-menu");
       },
       updateThinkingMenuMessage: async () => {
-        events.push("unexpected:thinking-menu");
+        events.push("thinking-menu");
       },
       updateStatusMessage: async () => {
         events.push("status-menu");
@@ -1098,7 +1096,6 @@ test("Menu runtime routes stored callback queries through callback action ports"
         events.push(`answer:${text ?? ""}`);
       },
       isIdle: (ctx) => ctx.idle,
-      hasActiveTelegramTurn: () => true,
       hasAbortHandler: () => true,
       hasActiveToolExecutions: () => false,
       setModel: async () => true,
@@ -1134,7 +1131,6 @@ test("Menu runtime routes stored callback queries through callback action ports"
         events.push(`answer:${text ?? ""}`);
       },
       isIdle: (ctx) => ctx.idle,
-      hasActiveTelegramTurn: () => true,
       hasAbortHandler: () => true,
       hasActiveToolExecutions: () => false,
       setModel: async (nextModel) => {
@@ -1159,16 +1155,70 @@ test("Menu runtime routes stored callback queries through callback action ports"
     "answer:",
     "thinking:high",
     "status",
-    "status-menu",
+    "thinking-menu",
     "answer:Thinking: high",
     "set-model:gpt-5",
     "current:gpt-5",
     "thinking:high",
     "status",
-    "model-menu",
     "restart:gpt-5",
+    "model-menu",
     "answer:Switching to gpt-5 and continuing…",
   ]);
+});
+
+test("Thinking choices remain in the same submenu until explicit Main menu navigation", async () => {
+  const model = createMenuModel("openai", "gpt-5", true);
+  const state = createMenuState<typeof model>(2, { mode: "status", threadId: 17 });
+  let level: ThinkingLevel = "medium";
+  const renders: Array<{ menuMode: typeof state.mode; text: string; markup: TelegramInlineKeyboardMarkup }> = [];
+  const sets: ThinkingLevel[] = [];
+  const actions = createTelegramMenuActionRuntime<{ idle: boolean }, typeof model>({
+    getModelMenuState: async () => state,
+    getActiveModel: () => model,
+    getThinkingLevel: () => level,
+    buildStatusHtml: () => "Main menu",
+    storeModelMenuState: () => {},
+    isIdle: () => true,
+    canOfferInFlightModelSwitch: () => false,
+    sendTextReply: async () => undefined,
+    sendInteractiveMessage: async () => { assert.fail("Selection must edit its existing menu"); },
+    editInteractiveMessage: async (chatId, messageId, text, mode, markup) => {
+      assert.equal(chatId, state.chatId); assert.equal(messageId, 2); assert.equal(mode, "html");
+      renders.push({ menuMode: state.mode, text, markup: markup! });
+    },
+  });
+  const deps = {
+    getStoredModelMenuState: (messageId?: number, chatId?: number) => messageId === state.messageId && chatId === state.chatId ? state : undefined,
+    getActiveModel: () => model, getThinkingLevel: () => level,
+    setThinkingLevel: (next: ThinkingLevel) => { level = next; sets.push(next); },
+    updateStatus: () => {},
+    updateModelMenuMessage: actions.updateModelMenuMessage,
+    updateThinkingMenuMessage: actions.updateThinkingMenuMessage,
+    updateStatusMessage: actions.updateStatusMessage,
+    answerCallbackQuery: async () => {},
+    isIdle: (ctx: { idle: boolean }) => ctx.idle,
+    hasAbortHandler: () => false, hasActiveToolExecutions: () => false,
+    setModel: async () => { assert.fail("Thinking selection must not select a model"); },
+    setCurrentModel: () => {}, stagePendingModelSwitch: () => {}, restartInterruptedTelegramTurn: () => false,
+  };
+  const click = (data: string) => handleTelegramMenuCallbackRuntime({ id: data, data,
+    message: { message_id: 2, message_thread_id: 17, chat: { id: state.chatId } } }, { idle: true }, deps);
+  await click("menu:thinking");
+  for (const next of ["high", "off", "off"] as const) {
+    await click(`thinking:set:${next}`);
+    assert.equal(state.mode, "thinking", "Choosing a level must not navigate to the root");
+    const last = renders.at(-1)!;
+    assert.equal(last.text, buildThinkingMenuText());
+    assert.deepEqual(last.markup, buildThinkingMenuReplyMarkup(next));
+    assert.equal(state.threadId, 17);
+  }
+  assert.deepEqual(sets, ["high", "off", "off"]);
+  assert.equal(renders.some(render => render.menuMode === "status"), false);
+  await click("menu:back");
+  assert.equal(state.mode, "status");
+  assert.equal(renders.at(-1)?.text, "Main menu");
+  assert.deepEqual(renders.at(-1)?.markup, buildStatusReplyMarkup(model, "off"));
 });
 
 test("Menu callback handler captures runtime ports", async () => {
@@ -1200,7 +1250,6 @@ test("Menu callback handler captures runtime ports", async () => {
       events.push(`answer:${text ?? ""}`);
     },
     isIdle: (ctx) => ctx.idle,
-    hasActiveTelegramTurn: () => false,
     hasAbortHandler: () => false,
     hasActiveToolExecutions: () => false,
     setModel: async () => true,
@@ -1221,6 +1270,7 @@ test("Menu callback adapter converts active tool count into runtime booleans", a
   const getActiveToolExecutions = () => activeToolExecutions;
   const state: TelegramModelMenuState = {
     ...createMenuState(2),
+    threadId: 42,
     allModels: [
       { model: createMenuModel("openai", "gpt-5", true) },
       { model: createMenuModel("anthropic", "claude-3", false) },
@@ -1244,18 +1294,25 @@ test("Menu callback adapter converts active tool count into runtime booleans", a
       events.push(`answer:${text ?? ""}`);
     },
     isIdle: () => false,
-    hasActiveTelegramTurn: () => true,
     hasAbortHandler: () => true,
     getActiveToolExecutions,
     setModel: async () => true,
     setCurrentModel: (nextModel) => {
       events.push(`current:${nextModel.id}`);
     },
-    stagePendingModelSwitch: (selection) => {
-      events.push(`pending:${selection.model.id}`);
+    stagePendingModelSwitch: (selection, _ctx, continuationTurn) => {
+      events.push(
+        `pending:${selection.model.id}:${continuationTurn.chatId}:${continuationTurn.target?.threadId}:${continuationTurn.replyToMessageId}`,
+      );
     },
-    restartInterruptedTelegramTurn: () => {
-      events.push("restart");
+    restartInterruptedTelegramTurn: (
+      _selection,
+      _ctx,
+      continuationTurn,
+    ) => {
+      events.push(
+        `restart:${continuationTurn.chatId}:${continuationTurn.target?.threadId}:${continuationTurn.replyToMessageId}`,
+      );
       return true;
     },
   });
@@ -1270,12 +1327,12 @@ test("Menu callback adapter converts active tool count into runtime booleans", a
   );
   assert.deepEqual(events, [
     "current:claude-3",
+    "pending:claude-3:1:42:2",
     "model-menu",
-    "pending:claude-3",
     "answer:Switched to claude-3. Restarting after the current tool finishes…",
     "current:claude-3",
+    "restart:1:42:2",
     "model-menu",
-    "restart",
     "answer:Switching to claude-3 and continuing…",
   ]);
 });
@@ -1411,15 +1468,15 @@ test("Menu helpers execute model callback actions across update, switch, and res
   assert.equal(events[0], "update-menu");
   assert.equal(events[1], "answer:");
   assert.equal(events[2], "current:claude-3");
-  assert.equal(events[3], "update-menu");
-  assert.equal(events[4], "pending:claude-3");
+  assert.equal(events[3], "pending:claude-3");
+  assert.equal(events[4], "update-menu");
   assert.equal(
     events[5],
     "answer:Switched to claude-3. Restarting after the current tool finishes…",
   );
   assert.equal(events[6], "current:claude-3");
-  assert.equal(events[7], "update-menu");
-  assert.equal(events[8], "restart:claude-3");
+  assert.equal(events[7], "restart:claude-3");
+  assert.equal(events[8], "update-menu");
   assert.equal(events[9], "answer:Switching to claude-3 and continuing…");
 });
 
@@ -1456,8 +1513,8 @@ test("Menu helpers handle status and thinking callback actions", async () => {
           events.push(`set:${level}`);
         },
         getCurrentThinkingLevel: () => "high",
-        updateStatusMessage: async () => {
-          events.push("status:update");
+        updateThinkingMenuMessage: async () => {
+          events.push("thinking:update");
         },
         answerCallbackQuery: async (_id, text) => {
           events.push(`answer:${text ?? ""}`);
@@ -1488,9 +1545,9 @@ test("Menu helpers handle status and thinking callback actions", async () => {
   assert.equal(events[0], "menu:model");
   assert.equal(events[1], "answer:");
   assert.equal(events[2], "set:high");
-  assert.equal(events[3], "status:update");
+  assert.equal(events[3], "thinking:update");
   assert.equal(events[4], "answer:Thinking: high");
-  assert.equal(events[5], "answer:This model has no reasoning controls.");
+  assert.equal(events[5], "answer:This model has no reasoning controls");
 });
 
 test("Menu helpers build pure render payloads before transport", () => {
@@ -1582,23 +1639,23 @@ test("Menu action runtime opens and updates interactive menu messages", async ()
   );
 });
 
-test("Menu action runtime with state builder opens menus from settings runtime", async () => {
+test("Menu action runtime opens menus from a settings-backed state builder", async () => {
   const events: string[] = [];
+  const statusMarkups: unknown[] = [];
+  let pendingCancellations = 1;
   const modelA = createMenuModel("openai", "gpt-5");
   const state = createMenuState<typeof modelA>(2, {
     scope: "all",
     allModels: [{ model: modelA }],
   });
-  const runtime = createTelegramMenuActionRuntimeWithStateBuilder<
-    typeof modelA,
-    {
-      cwd: string;
-      modelRegistry: {
-        refresh: () => void;
-        getAvailable: () => [typeof modelA];
-      };
-    }
-  >({
+  type Ctx = {
+    cwd: string;
+    modelRegistry: {
+      refresh: () => void;
+      getAvailable: () => [typeof modelA];
+    };
+  };
+  const getModelMenuState = createTelegramModelMenuStateBuilder<typeof modelA, Ctx>({
     runtime: {
       storeState: () => {},
       getState: () => undefined,
@@ -1619,7 +1676,12 @@ test("Menu action runtime with state builder opens menus from settings runtime",
       getEnabledModels: () => ["openai/*"],
     }),
     getActiveModel: () => modelA,
+  });
+  const runtime = createTelegramMenuActionRuntime<Ctx, typeof modelA>({
+    getModelMenuState,
+    getActiveModel: () => modelA,
     getThinkingLevel: () => "medium",
+    getPendingCancellationCount: () => pendingCancellations,
     buildStatusHtml: () => "status",
     storeModelMenuState: (nextState) => {
       events.push(`store:${nextState.messageId}`);
@@ -1627,9 +1689,10 @@ test("Menu action runtime with state builder opens menus from settings runtime",
     isIdle: () => true,
     canOfferInFlightModelSwitch: () => false,
     sendTextReply: async () => {},
-    editInteractiveMessage: async () => {},
-    sendInteractiveMessage: async (_chatId, text) => {
+    editInteractiveMessage: async (_chat, _message, _text, _mode, markup) => { statusMarkups.push(markup); },
+    sendInteractiveMessage: async (_chatId, text, _mode, markup) => {
       events.push(`send:${text}`);
+      if (text === "status") statusMarkups.push(markup);
       return 99;
     },
   });
@@ -1643,6 +1706,14 @@ test("Menu action runtime with state builder opens menus from settings runtime",
     "send:<b>🤖 Choose a model:</b>",
     "store:99",
   ]);
+  const ctx = { cwd: "/repo", modelRegistry: { refresh: () => {}, getAvailable: (): [typeof modelA] => [modelA] } };
+  await runtime.sendStatusMessage(1, 2, ctx);
+  assert.match(JSON.stringify(statusMarkups.at(-1)), /Pending cancellations: 1/);
+  assert.match(JSON.stringify(statusMarkups.at(-1)), /reroutecancel:review:open/);
+  assert.doesNotMatch(JSON.stringify(statusMarkups.at(-1)), /Historical inputs|reroutecancel:history:/);
+  pendingCancellations = 0;
+  await runtime.updateStatusMessage(state, ctx);
+  assert.doesNotMatch(JSON.stringify(statusMarkups.at(-1)), /reroutecancel/);
 });
 
 test("Menu helpers update and send interactive menu messages", async () => {
@@ -2047,7 +2118,7 @@ test("Queue item Keep and Skip selectors share deferred-removal state", async ()
     { text: "🟢 Keep", callback_data: "queue:skip-set:1:10:keep" },
     { text: "⚫️ Skip", callback_data: "queue:skip-set:1:10:skip" },
   ]);
-  assert.deepEqual(notices, [undefined, "Prioritized.", undefined]);
+  assert.deepEqual(notices, [undefined, "Prioritized", undefined]);
 
   assert.equal(await runtime.handleCallbackQuery(
     {
@@ -2058,6 +2129,129 @@ test("Queue item Keep and Skip selectors share deferred-removal state", async ()
     "ctx",
   ), false);
   assert.equal(queuedItems.length, 1);
+});
+
+test("Queue menu discards the selected guest prompt by queue order and dismisses its placeholder", async () => {
+  const state = createMenuState(2);
+  let queuedItems: TelegramQueueItem<string>[] = [
+    {
+      kind: "prompt",
+      chatId: 0,
+      replyToMessageId: 0,
+      queueOrder: 21,
+      queueLane: "default",
+      laneOrder: 1,
+      statusSummary: "first guest",
+      sourceMessageIds: [],
+      queuedAttachments: [],
+      content: [{ type: "text", text: "first guest" }],
+      historyText: "",
+      guestQueryId: "guest-1",
+      guestInlineMessageId: "inline-1",
+    },
+    {
+      kind: "prompt",
+      chatId: 0,
+      replyToMessageId: 0,
+      queueOrder: 22,
+      queueLane: "default",
+      laneOrder: 2,
+      statusSummary: "second guest",
+      sourceMessageIds: [],
+      queuedAttachments: [],
+      content: [{ type: "text", text: "second guest" }],
+      historyText: "",
+      guestQueryId: "guest-2",
+      guestInlineMessageId: "inline-2",
+    },
+  ];
+  const markups: TelegramInlineKeyboardMarkup[] = [];
+  const notices: Array<string | undefined> = [];
+  const dismissed: string[] = [];
+  const discardedOrders: number[] = [];
+  const runtime = createTelegramQueueMenuRuntime<string>({
+    telegramQueueStore: {
+      getQueuedItems: () => queuedItems,
+      setQueuedItems: (items) => {
+        queuedItems = items;
+      },
+      hasQueuedItems: () => queuedItems.length > 0,
+    },
+    queueMutationRuntime: {
+      append: () => {},
+      reorder: () => {},
+      clear: () => 0,
+      removeByMessageIds: () => 0,
+      removeGuestPromptByQueueOrder: (queueOrder) => {
+        const item = queuedItems.find((entry) => {
+          return entry.kind === "prompt" && entry.queueOrder === queueOrder;
+        });
+        if (!item) return false;
+        discardedOrders.push(queueOrder);
+        queuedItems = queuedItems.filter((entry) => entry !== item);
+        return true;
+      },
+      applyReactionByMessageId: () => false,
+    },
+    sendInteractiveMessage: async (_chatId, _text, _mode, replyMarkup) => {
+      markups.push(replyMarkup);
+      return 2;
+    },
+    editInteractiveMessage: async (
+      _chatId,
+      _messageId,
+      _text,
+      _mode,
+      replyMarkup,
+    ) => {
+      markups.push(replyMarkup);
+    },
+    answerCallbackQuery: async (_id, text) => {
+      notices.push(text);
+    },
+    getModelMenuState: async () => state,
+    getStoredModelMenuState: () => state,
+    storeModelMenuState: () => {},
+    updateStatusMessage: async () => {},
+    updateStatus: () => {},
+    dismissGuestPlaceholder: async (inlineMessageId) => {
+      dismissed.push(inlineMessageId);
+    },
+  });
+
+  await runtime.openQueueMenu(1, 10, "ctx");
+  assert.equal(
+    markups[0]?.inline_keyboard[2]?.[0]?.callback_data,
+    "queue:guest-pick:21",
+  );
+  assert.equal(
+    markups[0]?.inline_keyboard[3]?.[0]?.callback_data,
+    "queue:guest-pick:22",
+  );
+  assert.equal(await runtime.handleCallbackQuery(
+    {
+      id: "pick-second-guest",
+      data: "queue:guest-pick:22",
+      message: { chat: { id: 1 }, message_id: 2 },
+    },
+    "ctx",
+  ), true);
+  assert.deepEqual(markups[1]?.inline_keyboard[1], [
+    { text: "🔴 Skip", callback_data: "queue:guest-skip:22" },
+  ]);
+
+  assert.equal(await runtime.handleCallbackQuery(
+    {
+      id: "skip-second-guest",
+      data: "queue:guest-skip:22",
+      message: { chat: { id: 1 }, message_id: 2 },
+    },
+    "ctx",
+  ), true);
+  assert.deepEqual(discardedOrders, [22]);
+  assert.deepEqual(dismissed, ["inline-2"]);
+  assert.deepEqual(queuedItems.map((item) => item.queueOrder), [21]);
+  assert.equal(notices.at(-1), "Guest prompt skipped");
 });
 
 test("Queue refresh rotates empty queue title", async () => {
@@ -2268,7 +2462,6 @@ test("Section callback actions preserve callback thread target", async () => {
       updateStatusMessage: async () => {},
       answerCallbackQuery: async () => {},
       isIdle: () => true,
-      hasActiveTelegramTurn: () => false,
       hasAbortHandler: () => false,
       hasActiveToolExecutions: () => false,
       setModel: async () => true,

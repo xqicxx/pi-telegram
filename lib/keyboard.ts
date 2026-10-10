@@ -5,9 +5,7 @@
  */
 
 export type TelegramInlineKeyboardButtonStyle =
-  | "danger"
-  | "success"
-  | "primary";
+  "danger" | "success" | "primary";
 
 export type TelegramInlineKeyboardButton = {
   text: string;
@@ -34,9 +32,9 @@ export type TelegramReplyMarkup =
   | TelegramInlineKeyboardMarkup
   | TelegramForceReplyMarkup;
 
-export const TELEGRAM_CALLBACK_DATA_MAX_BYTES = 64;
+const TELEGRAM_CALLBACK_DATA_MAX_BYTES = 64;
 
-export function getTelegramCallbackDataByteLength(value: string): number {
+function getTelegramCallbackDataByteLength(value: string): number {
   return new TextEncoder().encode(value).byteLength;
 }
 

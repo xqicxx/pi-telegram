@@ -5,11 +5,14 @@
  */
 
 import type { TelegramInlineKeyboardMarkup } from "./keyboard.ts";
-import type { TelegramModelMenuState } from "./menu.ts";
+import {
+  createTelegramMenuDelivery,
+  type TelegramMenuMessageRuntimeDeps,
+  type TelegramModelMenuState,
+} from "./menu-model.ts";
 import type { MenuModel } from "./model.ts";
 import * as Queue from "./queue.ts";
-
-// --- Queue Menu ---
+import type { TelegramApiCallOptions } from "./telegram-api.ts";
 
 const QUEUE_ITEM_PROMPT_HTML_LIMIT = 3600;
 const QUEUE_ITEM_PROMPT_TRUNCATION_SUFFIX = "\n… [truncated]";
@@ -31,6 +34,8 @@ type TelegramQueueMenuReplyMarkup = TelegramInlineKeyboardMarkup;
 interface TelegramQueueMenuItem {
   chatId: number;
   replyToMessageId: number;
+  queueOrder: number;
+  isGuest: boolean;
   queuePosition: number;
   isPriority: boolean;
   priorityEmoji?: string;
@@ -60,6 +65,8 @@ function toTelegramQueueMenuItems<Context>(
     return {
       chatId: item.chatId,
       replyToMessageId: item.replyToMessageId,
+      queueOrder: item.queueOrder,
+      isGuest: item.kind === "prompt" && item.guestQueryId !== undefined,
       queuePosition: index + 1,
       isPriority: item.queueLane === "priority",
       priorityEmoji: item.kind === "prompt" ? item.priorityEmoji : undefined,
@@ -106,28 +113,22 @@ function buildTelegramQueueMenuReplyMarkup(
     return [
       {
         text: label,
-        callback_data: `queue:pick:${item.chatId}:${item.replyToMessageId}`,
+        callback_data: item.isGuest
+          ? `queue:guest-pick:${item.queueOrder}`
+          : `queue:pick:${item.chatId}:${item.replyToMessageId}`,
       },
     ];
   });
   return { inline_keyboard: [backRow, refreshRow, ...rows] };
 }
 
-function findTelegramQueueItem<Context>(
-  items: readonly Queue.TelegramQueueItem<Context>[],
+function findTelegramQueueItem<
+  TItem extends { chatId: number; replyToMessageId: number },
+>(
+  items: readonly TItem[],
   chatId: number,
   replyToMessageId: number,
-): Queue.TelegramQueueItem<Context> | undefined {
-  return items.find((item) => {
-    return item.chatId === chatId && item.replyToMessageId === replyToMessageId;
-  });
-}
-
-function findTelegramQueueMenuItem(
-  items: readonly TelegramQueueMenuItem[],
-  chatId: number,
-  replyToMessageId: number,
-): TelegramQueueMenuItem | undefined {
+): TItem | undefined {
   return items.find((item) => {
     return item.chatId === chatId && item.replyToMessageId === replyToMessageId;
   });
@@ -178,6 +179,22 @@ function getTelegramQueueMenuItemText(item: TelegramQueueMenuItem): string {
   return `${heading}\n${preview}`;
 }
 
+function buildTelegramGuestQueueItemSubmenuReplyMarkup(
+  queueOrder: number,
+): TelegramQueueMenuReplyMarkup {
+  return {
+    inline_keyboard: [
+      [{ text: "⬆️ Back", callback_data: "queue:list" }],
+      [
+        {
+          text: "🔴 Skip",
+          callback_data: `queue:guest-skip:${queueOrder}`,
+        },
+      ],
+    ],
+  };
+}
+
 function buildTelegramQueueItemSubmenuReplyMarkup(
   chatId: number,
   replyToMessageId: number,
@@ -217,6 +234,8 @@ interface TelegramQueueMenuCallbackDeps<Context = unknown> {
     chatId: number,
     replyToMessageId: number,
   ) => TelegramQueueMenuItem | undefined;
+  findGuestItem: (queueOrder: number) => TelegramQueueMenuItem | undefined;
+  skipGuest: (queueOrder: number, ctx: Context) => Promise<boolean>;
   togglePriority: (chatId: number, replyToMessageId: number) => boolean;
   setPriority: (
     chatId: number,
@@ -275,6 +294,38 @@ async function handleTelegramQueueMenuCallback<Context>(
     );
     return true;
   }
+  const guestPickMatch = data.match(/^queue:guest-pick:(\d+)$/);
+  if (guestPickMatch) {
+    await handleTelegramGuestQueueMenuPick(
+      callbackQueryId,
+      replyChatId,
+      replyMessageId,
+      Number(guestPickMatch[1]),
+      deps,
+    );
+    return true;
+  }
+  const guestSkipMatch = data.match(/^queue:guest-skip:(\d+)$/);
+  if (guestSkipMatch) {
+    const skipped = await deps.skipGuest(Number(guestSkipMatch[1]), ctx);
+    if (!skipped) {
+      await refreshStaleTelegramQueueMenuItem(
+        callbackQueryId,
+        replyChatId,
+        replyMessageId,
+        deps,
+      );
+      return true;
+    }
+    await updateTelegramQueueMenuList(
+      callbackQueryId,
+      replyChatId,
+      replyMessageId,
+      deps,
+      "Guest prompt skipped",
+    );
+    return true;
+  }
   const pickMatch = data.match(/^queue:pick:(\d+):(\d+)$/);
   if (pickMatch) {
     await handleTelegramQueueMenuPick(
@@ -316,9 +367,7 @@ async function handleTelegramQueueMenuCallback<Context>(
     );
     return true;
   }
-  const skipSetMatch = data.match(
-    /^queue:skip-set:(\d+):(\d+):(skip|keep)$/,
-  );
+  const skipSetMatch = data.match(/^queue:skip-set:(\d+):(\d+):(skip|keep)$/);
   if (skipSetMatch) {
     await handleTelegramQueueMenuSkipSet(
       callbackQueryId,
@@ -375,8 +424,33 @@ async function refreshStaleTelegramQueueMenuItem<Context>(
     replyChatId,
     replyMessageId,
     deps,
-    "Item no longer in queue.",
+    "Item no longer in queue",
   );
+}
+
+async function handleTelegramGuestQueueMenuPick<Context>(
+  callbackQueryId: string,
+  replyChatId: number,
+  replyMessageId: number,
+  queueOrder: number,
+  deps: TelegramQueueMenuCallbackDeps<Context>,
+): Promise<void> {
+  const item = deps.findGuestItem(queueOrder);
+  if (!item) {
+    return refreshStaleTelegramQueueMenuItem(
+      callbackQueryId,
+      replyChatId,
+      replyMessageId,
+      deps,
+    );
+  }
+  await deps.updateQueueMessage(
+    replyChatId,
+    replyMessageId,
+    getTelegramQueueMenuItemText(item),
+    buildTelegramGuestQueueItemSubmenuReplyMarkup(queueOrder),
+  );
+  await deps.answerCallbackQuery(callbackQueryId);
 }
 
 async function handleTelegramQueueMenuPick<Context>(
@@ -505,7 +579,7 @@ async function updateTelegramQueueMenuPriority<Context>(
   );
   await deps.answerCallbackQuery(
     callbackQueryId,
-    updated.isPriority ? "Prioritized." : "Normal priority.",
+    updated.isPriority ? "Prioritized" : "Normal priority",
   );
 }
 
@@ -563,6 +637,8 @@ interface TelegramQueueMenuRuntime<Context> {
     chatId: number,
     replyToMessageId: number,
     ctx: Context,
+    threadId?: number,
+    options?: Pick<TelegramApiCallOptions, "assertAuthority">,
   ) => Promise<void>;
   handleCallbackQuery: (
     query: TelegramQueueMenuCallbackQuery,
@@ -575,12 +651,7 @@ export function createTelegramQueueMenuRuntime<
 >(deps: {
   telegramQueueStore: Queue.TelegramQueueStateStore<Context>;
   queueMutationRuntime: Queue.TelegramQueueMutationController<Context>;
-  sendInteractiveMessage: (
-    chatId: number,
-    text: string,
-    mode: "html",
-    replyMarkup: TelegramQueueMenuReplyMarkup,
-  ) => Promise<number | undefined>;
+  sendInteractiveMessage: TelegramMenuMessageRuntimeDeps["sendInteractiveMessage"];
   editInteractiveMessage: (
     chatId: number,
     messageId: number,
@@ -595,6 +666,7 @@ export function createTelegramQueueMenuRuntime<
   getModelMenuState: (
     chatId: number,
     ctx: Context,
+    threadId?: number,
   ) => Promise<TelegramModelMenuState<TModel>>;
   getStoredModelMenuState: (
     messageId: number | undefined,
@@ -606,6 +678,7 @@ export function createTelegramQueueMenuRuntime<
     ctx: Context,
   ) => Promise<void>;
   updateStatus: (ctx: Context) => void;
+  dismissGuestPlaceholder?: (inlineMessageId: string) => Promise<void>;
 }): TelegramQueueMenuRuntime<Context> {
   const sendQueueMenuMessage = createQueueMenuSendMessageAdapter(
     deps.sendInteractiveMessage,
@@ -614,12 +687,22 @@ export function createTelegramQueueMenuRuntime<
     deps.editInteractiveMessage,
   );
   return {
-    openQueueMenu: createOpenQueueMenu<Context, TModel>({
-      getQueuedItems: deps.telegramQueueStore.getQueuedItems,
-      getModelMenuState: deps.getModelMenuState,
-      storeModelMenuState: deps.storeModelMenuState,
-      sendInteractiveMessage: sendQueueMenuMessage,
-    }),
+    openQueueMenu: (chatId, replyToMessageId, ctx, threadId, options) => {
+      const delivery = createTelegramMenuDelivery(
+        { chatId, threadId },
+        options,
+        deps,
+      );
+      return createOpenQueueMenu<Context, TModel>({
+        getQueuedItems: deps.telegramQueueStore.getQueuedItems,
+        getModelMenuState: (chat, context) =>
+          deps.getModelMenuState(chat, context, threadId),
+        storeModelMenuState: delivery.storeModelMenuState,
+        sendInteractiveMessage: delivery.assertAuthority
+          ? createQueueMenuSendMessageAdapter(delivery.sendInteractiveMessage)
+          : sendQueueMenuMessage,
+      })(chatId, replyToMessageId, ctx);
+    },
     handleCallbackQuery: createQueueMenuCallbackHandler<Context, TModel>({
       telegramQueueStore: deps.telegramQueueStore,
       queueMutationRuntime: deps.queueMutationRuntime,
@@ -628,6 +711,7 @@ export function createTelegramQueueMenuRuntime<
       updateStatusMessage: deps.updateStatusMessage,
       answerCallbackQuery: deps.answerCallbackQuery,
       updateStatus: deps.updateStatus,
+      dismissGuestPlaceholder: deps.dismissGuestPlaceholder,
     }),
   };
 }
@@ -695,6 +779,7 @@ function createQueueMenuCallbackHandler<
     text?: string,
   ) => Promise<void>;
   updateStatus: (ctx: Context) => void;
+  dismissGuestPlaceholder?: (inlineMessageId: string) => Promise<void>;
 }) {
   return async (
     query: TelegramQueueMenuCallbackQuery,
@@ -708,10 +793,7 @@ function createQueueMenuCallbackHandler<
     if (data === "menu:queue" || data === "status:queue") {
       const state = deps.getStoredModelMenuState(messageId, chatId);
       if (!state) {
-        await deps.answerCallbackQuery(
-          query.id,
-          "Interactive message expired.",
-        );
+        await deps.answerCallbackQuery(query.id, "Interactive message expired");
         return true;
       }
       const menuItems = toTelegramQueueMenuItems(
@@ -735,7 +817,16 @@ function createQueueMenuCallbackHandler<
       return toTelegramQueueMenuItems(getQueueSnapshot());
     };
     const findItem = (cId: number, rId: number) => {
-      return findTelegramQueueMenuItem(toMenuItems(), cId, rId);
+      return findTelegramQueueItem(toMenuItems(), cId, rId);
+    };
+    const findGuestItem = (queueOrder: number) => {
+      return toMenuItems().find((item) => {
+        return item.isGuest && item.queueOrder === queueOrder;
+      });
+    };
+    const flagDeps = {
+      getQueueSnapshot,
+      queueMutationRuntime: deps.queueMutationRuntime,
     };
     return handleTelegramQueueMenuCallback(
       query.id,
@@ -746,30 +837,78 @@ function createQueueMenuCallbackHandler<
       {
         getQueuedItems: toMenuItems,
         findItem,
-        togglePriority: (cId, rId) => {
-          return toggleQueuedTelegramPromptPriority(cId, rId, ctx, {
+        findGuestItem,
+        skipGuest: (queueOrder, callbackContext) => {
+          return skipQueuedTelegramGuestPrompt(queueOrder, callbackContext, {
             getQueueSnapshot,
             queueMutationRuntime: deps.queueMutationRuntime,
+            dismissGuestPlaceholder: deps.dismissGuestPlaceholder,
           });
         },
-        setPriority: (cId, rId, enabled) => {
-          return setQueuedTelegramPromptPriority(cId, rId, enabled, ctx, {
-            getQueueSnapshot,
-            queueMutationRuntime: deps.queueMutationRuntime,
-          });
-        },
-        setSkipped: (cId, rId, skipped) => {
-          return setQueuedTelegramPromptSkipped(cId, rId, skipped, ctx, {
-            getQueueSnapshot,
-            queueMutationRuntime: deps.queueMutationRuntime,
-          });
-        },
+        togglePriority: (cId, rId) =>
+          applyQueuedTelegramPromptMenuFlags(
+            cId,
+            rId,
+            ctx,
+            flagDeps,
+            (item) => ({
+              priority: item.queueLane !== "priority",
+              skipped: isQueuedTelegramPromptSkipped(item),
+            }),
+          ),
+        setPriority: (cId, rId, enabled) =>
+          applyQueuedTelegramPromptMenuFlags(
+            cId,
+            rId,
+            ctx,
+            flagDeps,
+            (item) => ({
+              priority: enabled,
+              skipped: isQueuedTelegramPromptSkipped(item),
+            }),
+          ),
+        setSkipped: (cId, rId, skipped) =>
+          applyQueuedTelegramPromptMenuFlags(cId, rId, ctx, flagDeps, (item) =>
+            item.kind === "prompt"
+              ? { priority: item.queueLane === "priority", skipped }
+              : undefined,
+          ),
         updateQueueMessage: deps.editInteractiveMessage,
         answerCallbackQuery: deps.answerCallbackQuery,
         updateStatus: deps.updateStatus,
       },
     );
   };
+}
+
+async function skipQueuedTelegramGuestPrompt<Context>(
+  queueOrder: number,
+  ctx: Context,
+  deps: {
+    getQueueSnapshot: () => Queue.TelegramQueueItem<Context>[];
+    queueMutationRuntime: Queue.TelegramQueueMutationController<Context>;
+    dismissGuestPlaceholder?: (inlineMessageId: string) => Promise<void>;
+  },
+): Promise<boolean> {
+  const item = deps.getQueueSnapshot().find((candidate) => {
+    return (
+      candidate.kind === "prompt" &&
+      candidate.guestQueryId !== undefined &&
+      candidate.queueOrder === queueOrder
+    );
+  });
+  if (!item || !deps.queueMutationRuntime.removeGuestPromptByQueueOrder) {
+    return false;
+  }
+  const removed = deps.queueMutationRuntime.removeGuestPromptByQueueOrder(
+    queueOrder,
+    ctx,
+  );
+  if (!removed) return false;
+  if (item.guestInlineMessageId && deps.dismissGuestPlaceholder) {
+    await deps.dismissGuestPlaceholder(item.guestInlineMessageId);
+  }
+  return true;
 }
 
 function getQueueMenuReactionDisposition<Context>(
@@ -781,111 +920,56 @@ function getQueueMenuReactionDisposition<Context>(
     return {
       kind: "priority-suppressed",
       priorityEmoji:
-        item.kind === "prompt" ? item.priorityEmoji ?? "⚡" : "⚡",
+        item.kind === "prompt" ? (item.priorityEmoji ?? "⚡") : "⚡",
       suppressionEmoji:
-        item.kind === "prompt"
-          ? item.reactionSuppressionEmoji ?? "👎"
-          : "👎",
+        item.kind === "prompt" ? (item.reactionSuppressionEmoji ?? "👎") : "👎",
     };
   }
   if (priority) {
     return {
       kind: "priority",
-      emoji: item.kind === "prompt" ? item.priorityEmoji ?? "⚡" : "⚡",
+      emoji: item.kind === "prompt" ? (item.priorityEmoji ?? "⚡") : "⚡",
     };
   }
   if (skipped) {
     return {
       kind: "suppressed",
       emoji:
-        item.kind === "prompt"
-          ? item.reactionSuppressionEmoji ?? "👎"
-          : "👎",
+        item.kind === "prompt" ? (item.reactionSuppressionEmoji ?? "👎") : "👎",
     };
   }
   return { kind: "default" };
 }
 
-function toggleQueuedTelegramPromptPriority<Context>(
-  chatId: number,
-  replyToMessageId: number,
-  ctx: Context,
-  deps: {
-    getQueueSnapshot: () => Queue.TelegramQueueItem<Context>[];
-    queueMutationRuntime: Queue.TelegramQueueMutationController<Context>;
-  },
+function isQueuedTelegramPromptSkipped<Context>(
+  item: Queue.TelegramQueueItem<Context>,
 ): boolean {
-  const item = findTelegramQueueItem(
-    deps.getQueueSnapshot(),
-    chatId,
-    replyToMessageId,
-  );
-  if (!item) return false;
-  deps.queueMutationRuntime.applyReactionByMessageId(
-    replyToMessageId,
-    getQueueMenuReactionDisposition(
-      item,
-      item.queueLane !== "priority",
-      item.kind === "prompt" &&
-        item.reactionSuppressionEmoji !== undefined,
-    ),
-    ctx,
-  );
-  return true;
+  return item.kind === "prompt" && item.reactionSuppressionEmoji !== undefined;
 }
 
-function setQueuedTelegramPromptPriority<Context>(
+/** Applies a menu Priority/Skip choice to one queued item through the reaction disposition path. */
+function applyQueuedTelegramPromptMenuFlags<Context>(
   chatId: number,
   replyToMessageId: number,
-  enabled: boolean,
   ctx: Context,
   deps: {
     getQueueSnapshot: () => Queue.TelegramQueueItem<Context>[];
     queueMutationRuntime: Queue.TelegramQueueMutationController<Context>;
   },
+  chooseFlags: (
+    item: Queue.TelegramQueueItem<Context>,
+  ) => { priority: boolean; skipped: boolean } | undefined,
 ): boolean {
   const item = findTelegramQueueItem(
     deps.getQueueSnapshot(),
     chatId,
     replyToMessageId,
   );
-  if (!item) return false;
+  const flags = item ? chooseFlags(item) : undefined;
+  if (!item || !flags) return false;
   deps.queueMutationRuntime.applyReactionByMessageId(
     replyToMessageId,
-    getQueueMenuReactionDisposition(
-      item,
-      enabled,
-      item.kind === "prompt" &&
-        item.reactionSuppressionEmoji !== undefined,
-    ),
-    ctx,
-  );
-  return true;
-}
-
-function setQueuedTelegramPromptSkipped<Context>(
-  chatId: number,
-  replyToMessageId: number,
-  skipped: boolean,
-  ctx: Context,
-  deps: {
-    getQueueSnapshot: () => Queue.TelegramQueueItem<Context>[];
-    queueMutationRuntime: Queue.TelegramQueueMutationController<Context>;
-  },
-): boolean {
-  const item = findTelegramQueueItem(
-    deps.getQueueSnapshot(),
-    chatId,
-    replyToMessageId,
-  );
-  if (!item || item.kind !== "prompt") return false;
-  deps.queueMutationRuntime.applyReactionByMessageId(
-    replyToMessageId,
-    getQueueMenuReactionDisposition(
-      item,
-      item.queueLane === "priority",
-      skipped,
-    ),
+    getQueueMenuReactionDisposition(item, flags.priority, flags.skipped),
     ctx,
   );
   return true;
