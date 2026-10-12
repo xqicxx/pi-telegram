@@ -801,7 +801,7 @@ async function sendTelegramNativeRichMessage(
       options?: Pick<TelegramApiCallOptions, "assertAuthority">,
     ) => Promise<TelegramSentMessage>;
   },
-  options?: TelegramReplyTargetOptions,
+  options?: TelegramReplyTargetOptions & { replyMarkup?: unknown },
 ): Promise<number> {
   options = { ...options, target: options?.target && { ...options.target } };
   const assertAuthority = options.assertAuthority;
@@ -810,6 +810,7 @@ async function sendTelegramNativeRichMessage(
     {
       chat_id: chatId,
       rich_message: richMessage,
+      ...(options?.replyMarkup ? { reply_markup: options.replyMarkup } : {}),
       ...(options?.target ? getTelegramTargetThreadParams(options.target) : {}),
     },
     assertAuthority ? { assertAuthority } : undefined,
@@ -1021,7 +1022,7 @@ export function createTelegramRenderedMessageRuntime<TReplyMarkup>(
             recordOwnership: deps.recordOwnership,
             sendRichMessage: deps.sendRichMessage,
           },
-          options,
+          { ...options, replyMarkup },
         );
       }
       return deps.replyTransport.sendRenderedChunks(

@@ -1638,3 +1638,24 @@ test("Markdown fences open on three markers and close only on a long-enough matc
   assert.equal(isTelegramMarkdownFenceClosing("````` ", fence!), true);
   assert.equal(isTelegramMarkdownFenceClosing("```` code", fence!), false);
 });
+
+test("Interactive rich-block sends keep the inline keyboard", async () => {
+  const richBodies: Array<Record<string, unknown>> = [];
+  const runtime = createTelegramRenderedMessageDeliveryRuntime({
+    renderTelegramMessage: (text) => [{ text: `html:${text}` }],
+    sendMessage: async () => ({ message_id: 1 }),
+    editMessage: async () => {},
+    sendRichMessage: async (body) => {
+      richBodies.push(body);
+      return { message_id: richBodies.length };
+    },
+  });
+  const markup = {
+    inline_keyboard: [[{ text: "🧠 Model", callback_data: "menu:model" }]],
+  };
+  await runtime.sendInteractiveMessage(7, "card", "html", markup, {
+    blocks: [{ type: "paragraph", text: "card" }],
+  });
+  assert.equal(richBodies.length, 1);
+  assert.deepEqual(richBodies[0]!.reply_markup, markup);
+});
