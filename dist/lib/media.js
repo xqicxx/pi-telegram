@@ -424,11 +424,13 @@ export function formatTelegramHistoryText(rawText, files, handlerOutputs = []) {
 export async function downloadTelegramMessageFiles(messages, deps) {
     const downloaded = [];
     for (const file of collectTelegramFileInfos(messages)) {
+        const path = await deps.downloadFile(file.file_id, file.fileName, file.source);
+        const isUnavailable = path.endsWith(".unavailable.txt");
         downloaded.push({
-            path: await deps.downloadFile(file.file_id, file.fileName, file.source),
-            fileName: file.fileName,
-            isImage: file.isImage,
-            mimeType: file.mimeType,
+            path,
+            fileName: isUnavailable ? `${file.fileName}.unavailable.txt` : file.fileName,
+            isImage: isUnavailable ? false : file.isImage,
+            mimeType: isUnavailable ? "text/plain" : file.mimeType,
             kind: file.kind,
         });
     }

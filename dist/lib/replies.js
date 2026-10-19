@@ -478,6 +478,7 @@ async function sendTelegramNativeRichMessage(chatId, richMessage, deps, options)
     const sent = await deps.sendRichMessage({
         chat_id: chatId,
         rich_message: richMessage,
+        ...(options?.replyMarkup ? { reply_markup: options.replyMarkup } : {}),
         ...(options?.target ? getTelegramTargetThreadParams(options.target) : {}),
     }, assertAuthority ? { assertAuthority } : undefined);
     assertTelegramApiCallAuthority(assertAuthority, true);
@@ -563,7 +564,7 @@ export function createTelegramRenderedMessageRuntime(deps) {
                 return sendTelegramNativeRichMessage(chatId, { blocks: [...options.blocks] }, {
                     recordOwnership: deps.recordOwnership,
                     sendRichMessage: deps.sendRichMessage,
-                }, options);
+                }, { ...options, replyMarkup });
             }
             return deps.replyTransport.sendRenderedChunks(chatId, deps.renderTelegramMessage(text, { mode }), {
                 replyMarkup,

@@ -122,6 +122,12 @@ function formatToolActivityLabel(label) {
     })
         .join(" ");
 }
+/** Card status in the same language as the thinking headline. */
+function toolStatusLabel(tool) {
+    if (!tool.complete)
+        return "运行中";
+    return tool.isError ? "失败" : "完成";
+}
 function renderToolActivityHtml(tool) {
     const evidence = [`"arguments": ${tool.args}`];
     if (tool.droppedUpdates > 0) {
@@ -133,7 +139,7 @@ function renderToolActivityHtml(tool) {
     if (tool.complete && tool.result !== undefined) {
         evidence.push(`"${tool.isError ? "error" : "result"}": ${tool.result}`);
     }
-    const status = tool.complete ? (tool.isError ? "failed" : "done") : "running";
+    const status = toolStatusLabel(tool);
     return [
         `<b>${escapeHtml(formatToolActivityLabel(tool.name))}:</b> <code>${status}</code>`,
         `<blockquote expandable>${escapeActivityEvidenceHtml(evidence.join("\n\n"))}</blockquote>`,
@@ -172,20 +178,20 @@ function createToolActivityDetail(summary, text, isOpen = false) {
     };
 }
 function renderToolActivityRichBlocks(tool) {
-    const status = tool.complete ? (tool.isError ? "failed" : "done") : "running";
+    const status = toolStatusLabel(tool);
     // Arguments start collapsed: the row stays one line until the operator taps it.
     const evidenceBlocks = [
-        createToolActivityDetail("arguments", tool.args),
+        createToolActivityDetail("参数", tool.args),
     ];
     tool.updates.forEach((update, index) => {
         const number = tool.droppedUpdates + index + 1;
         const omitted = index === 0 && tool.droppedUpdates > 0
-            ? ` (${tool.droppedUpdates} earlier omitted)`
+            ? `（较早 ${tool.droppedUpdates} 条已省略）`
             : "";
-        evidenceBlocks.push(createToolActivityDetail(`update ${number}${omitted}`, update));
+        evidenceBlocks.push(createToolActivityDetail(`更新 ${number}${omitted}`, update));
     });
     if (tool.complete && tool.result !== undefined) {
-        evidenceBlocks.push(createToolActivityDetail(tool.isError ? "error" : "result", tool.result));
+        evidenceBlocks.push(createToolActivityDetail(tool.isError ? "错误" : "结果", tool.result));
     }
     const hint = toolActivityArgumentHint(tool);
     return [
@@ -250,19 +256,33 @@ export function renderTelegramThinkingRichBlocks(text, state = {}) {
         state.finished
             ? {
                 type: "bold",
-                text: `🧠 Thought for ${Math.max(1, Math.round((state.durationMs ?? 0) / 1000))}s`,
+                text: `🧠 思考 ${Math.max(1, Math.round((state.durationMs ?? 0) / 1000))} 秒`,
             }
-            : { type: "bold", text: "🧠 Thinking…" },
+            : { type: "bold", text: "🧠 思考中…" },
     ];
     if (chars)
         head.push(" ", { type: "code", text: chars });
     if (state.finished && state.tools && state.tools > 0) {
-        head.push(" · ", `🛠 ${state.tools}`);
+        head.push(" · ", `🛠 ${state.tools} 次`);
     }
     const blocks = [{ type: "paragraph", text: head }];
+    // Short reasoning fits on one line: no disclosure, no controls, just the text.
+    const fitsOnOneLine = !text.includes("\n") && text.length <= TELEGRAM_THINKING_PREVIEW_MAX_CHARS;
+    if (fitsOnOneLine) {
+        const line = text.replace(/\s+/gu, " ").trim();
+        if (line) {
+            blocks.push({
+                type: "paragraph",
+                // A live caret makes the card read as "still writing" without an animation.
+                text: state.finished ? line : `${line} ▍`,
+            });
+        }
+        return blocks;
+    }
     const preview = state.finished ? undefined : thinkingActivityPreview(text);
-    if (preview)
-        blocks.push({ type: "paragraph", text: preview });
+    if (preview) {
+        blocks.push({ type: "paragraph", text: `${preview} ▍` });
+    }
     blocks.push({
         type: "details",
         // Size lives on the headline only — repeating it here read as a duplicate.
@@ -274,8 +294,7 @@ export function renderTelegramThinkingRichBlocks(text, state = {}) {
             ...(state.foldMessageId === undefined
                 ? []
                 : [
-                    thinkingFoldButtonBlock(state.foldMessageId, state.foldHighlighted),
-                    thinkingFullButtonBlock(state.foldMessageId),
+                    ...thinkingControlBlocks(state.foldMessageId, state.foldHighlighted),
                 ]),
         ],
     });
@@ -304,40 +323,34 @@ export function thinkingFoldKeyboard(messageId, alternate = false) {
     };
 }
 /**
- * In-bubble closer. The rich `buttons` block sizes to its label, so the label is
- * padded with ideographic spaces to reach across the bubble — the only way to
- * get an inside-the-bubble control that reads as full width. `alternate` shifts
- * the padding by one cell so a repeat tap is a changed payload.
+ * Fold and full-text controls as one row under a divider.
+ *
+ * Telegram sizes a rich-bubble button to its label and offers no width switch,
+ * so padding a label with rule glyphs (the old `收起 ─────` trick) only produced
+ * a fake rule that read as decoration. A divider plus a two-button row keeps the
+ * card tidy, gives both actions the same weight, and stays inside the bubble.
+ * `style` is the only payload-safe way to differ between repeat taps: Telegram
+ * trims trailing spaces and rejects an edit whose payload did not change.
  */
-const TELEGRAM_THINKING_FOLD_RULE = "─".repeat(20);
-/** Companion control: ship the unbounded reasoning as a .txt document. */
-function thinkingFullButtonBlock(messageId) {
-    return {
-        type: "buttons",
-        align: "center",
-        buttons: [
-            {
-                text: `全文 .txt ${TELEGRAM_THINKING_FOLD_RULE}`,
-                callback_data: `${TELEGRAM_THINKING_FULL_CALLBACK_PREFIX}${messageId}`,
-            },
-        ],
-    };
-}
-function thinkingFoldButtonBlock(messageId, alternate = false) {
-    return {
-        type: "buttons",
-        align: "center",
-        buttons: [
-            {
-                // Trailing spaces are trimmed by the client, so the label is widened
-                // with rule glyphs; the style toggle keeps repeat taps a *changed*
-                // payload, which is what Telegram requires to accept the fold edit.
-                text: `收起 ${TELEGRAM_THINKING_FOLD_RULE}`,
-                ...(alternate ? { style: "primary" } : {}),
-                callback_data: `${TELEGRAM_THINKING_FOLD_CALLBACK_PREFIX}${messageId}`,
-            },
-        ],
-    };
+function thinkingControlBlocks(messageId, alternate = false) {
+    return [
+        { type: "divider" },
+        {
+            type: "buttons",
+            align: "center",
+            buttons: [
+                {
+                    text: "收起",
+                    ...(alternate ? { style: "primary" } : {}),
+                    callback_data: `${TELEGRAM_THINKING_FOLD_CALLBACK_PREFIX}${messageId}`,
+                },
+                {
+                    text: "全文 .txt",
+                    callback_data: `${TELEGRAM_THINKING_FULL_CALLBACK_PREFIX}${messageId}`,
+                },
+            ],
+        },
+    ];
 }
 /** Taps seen per card, so the fold payload can differ on every tap. */
 const thinkingFoldTaps = new Map();

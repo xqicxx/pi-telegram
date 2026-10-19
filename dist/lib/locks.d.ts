@@ -9,7 +9,7 @@ import { renameSync } from "node:fs";
  * is answerable from logs.jsonl instead of guessed at from Telegram output.
  * Bump it whenever a change must be visible in the live bridge.
  */
-export declare const TELEGRAM_BUILD_STAMP = "0.54.3+thinking-widerule-21";
+export declare const TELEGRAM_BUILD_STAMP = "0.54.3+thinking-widerule-22";
 export declare const TELEGRAM_LOCK_KEY = "default";
 export declare const TELEGRAM_BUS_LEADER_STALE_HEARTBEAT_MS = 8000;
 export declare const TELEGRAM_OWNERSHIP_CHECK_MS = 1000;

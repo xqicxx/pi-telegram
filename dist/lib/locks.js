@@ -15,7 +15,7 @@ import { isWireRecord as runtimeStateRecord } from "./wire.js";
  * is answerable from logs.jsonl instead of guessed at from Telegram output.
  * Bump it whenever a change must be visible in the live bridge.
  */
-export const TELEGRAM_BUILD_STAMP = "0.54.3+thinking-widerule-21";
+export const TELEGRAM_BUILD_STAMP = "0.54.3+thinking-widerule-22";
 export const TELEGRAM_LOCK_KEY = "default";
 export const TELEGRAM_BUS_LEADER_STALE_HEARTBEAT_MS = 8_000;
 export const TELEGRAM_OWNERSHIP_CHECK_MS = 1_000;

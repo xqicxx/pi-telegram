@@ -4,8 +4,9 @@
  * Converts bridge-owned UI/status/menu/interactive text into Telegram-safe plain text and HTML chunks with chunk-boundary handling
  */
 export const MAX_MESSAGE_LENGTH = 4096;
-const TELEGRAM_TABLE_GRAPHEME_SEGMENTER = typeof Intl.Segmenter === "function"
-    ? new Intl.Segmenter(undefined, { granularity: "grapheme" })
+const SEGMENTER_CTOR = Intl.Segmenter;
+const TELEGRAM_TABLE_GRAPHEME_SEGMENTER = SEGMENTER_CTOR
+    ? new SEGMENTER_CTOR(undefined, { granularity: "grapheme" })
     : undefined;
 const TELEGRAM_TABLE_EMOJI_GRAPHEME_PATTERN = /\p{Extended_Pictographic}|\p{Emoji_Presentation}|\p{Regional_Indicator}/u;
 const TELEGRAM_VOID_HTML_TAGS = new Set(["br", "hr"]);
@@ -22,14 +23,14 @@ function getHtmlTagName(tag) {
     return tag.match(/^<\/?\s*([a-zA-Z][\w-]*)/)?.[1]?.toLowerCase();
 }
 function isHtmlClosingTag(tag) {
-    return /^<\//.test(tag);
+    return tag.startsWith("</");
 }
 function isHtmlSelfClosingTag(tag) {
     return /\/\s*>$/.test(tag);
 }
 function getHtmlClosingTags(openTags) {
-    return [...openTags]
-        .reverse()
+    return openTags
+        .toReversed()
         .map((tag) => `</${tag.name}>`)
         .join("");
 }
@@ -49,6 +50,33 @@ function updateOpenHtmlTags(tag, openTags) {
     if (isHtmlSelfClosingTag(tag))
         return;
     openTags.push({ name, openTag: tag });
+}
+/**
+ * A long message should not break mid-sentence: look for the last paragraph,
+ * line, sentence or word boundary inside the slice before cutting. Returns the
+ * exclusive cut index, or undefined when only a hard cut is possible.
+ */
+function findHtmlSoftBreak(slice) {
+    const minKeep = Math.floor(slice.length * 0.55);
+    const patterns = [/\n\n/gu, /\n/gu, /[。！？；!?;]/gu, /[，、,]/gu, /\s/gu];
+    for (const pattern of patterns) {
+        let last;
+        for (const match of slice.matchAll(pattern)) {
+            const end = (match.index ?? 0) + match[0].length;
+            if (end > minKeep)
+                last = end;
+        }
+        if (last !== undefined)
+            return last;
+    }
+    return undefined;
+}
+/** Never split a surrogate pair, which would corrupt an emoji at the seam. */
+function safeCutIndex(slice, cut) {
+    if (cut <= 0)
+        return cut;
+    const code = slice.charCodeAt(cut - 1);
+    return code >= 0xd800 && code <= 0xdbff ? cut - 1 : cut;
 }
 export function chunkHtmlPreservingTags(html, maxLength) {
     if (html.length <= maxLength)
@@ -73,7 +101,13 @@ export function chunkHtmlPreservingTags(html, maxLength) {
                 flushCurrent();
                 continue;
             }
-            const slice = remaining.slice(0, available);
+            let slice = remaining.slice(0, available);
+            if (remaining.length > available) {
+                const cut = findHtmlSoftBreak(slice);
+                if (cut !== undefined && safeCutIndex(slice, cut) > 0) {
+                    slice = slice.slice(0, safeCutIndex(slice, cut));
+                }
+            }
             current += slice;
             remaining = remaining.slice(slice.length);
             if (remaining.length > 0)
@@ -315,7 +349,7 @@ function stripInlineMarkdownToPlainText(text) {
     result = result.replace(/(\*\*|__)(.+?)\1/g, "$2");
     result = result.replace(/(\*|_)(.+?)\1/g, "$2");
     result = result.replace(/~~(.+?)~~/g, "$1");
-    result = result.replace(/\\([\\`*_{}\[\]()#+\-.!>~|])/g, "$1");
+    result = result.replace(/\\([\\`*_{}[\]()#+\-.!>~|])/g, "$1");
     return result;
 }
 function isMarkdownTableSeparator(line) {
@@ -465,7 +499,7 @@ function renderInlineMarkdown(text, options = {}) {
     result = stashInlineMarkdownCodeSpans(result, tokenState);
     result = escapeHtml(result);
     result = applyInlineMarkdownStyles(result);
-    result = result.replace(/\\([\\`*_{}\[\]()#+\-.!>~|])/g, "$1");
+    result = result.replace(/\\([\\`*_{}[\]()#+\-.!>~|])/g, "$1");
     return restoreInlineMarkdownTokens(result, tokenState);
 }
 export function renderTelegramInlineMarkdownHtml(text, options = {}) {
