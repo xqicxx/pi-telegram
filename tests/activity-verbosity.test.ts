@@ -279,7 +279,7 @@ for (const stage of [
           ),
         );
         if (thinking) {
-          assert.match(JSON.stringify(later.at(-1)), /Thought for/);
+          assert.match(JSON.stringify(later.at(-1)), /思考/);
         }
       } finally {
         release();
@@ -573,19 +573,19 @@ test("reasoning uses a persistent collapsed disclosure message", async () => {
   });
   assert.match(
     JSON.stringify(harness.richSends[0]?.rich_message),
-    /🧠 Thinking/,
+    /🧠 思考中/,
   );
   assert.equal(harness.edits.length, 2);
   assert.equal(harness.edits[0]?.text, undefined);
   const digest = JSON.stringify(harness.edits[1]?.rich_message);
-  assert.match(digest, /🧠 Thought for/);
+  assert.match(digest, /🧠 思考/);
   assert.match(digest, /展开全文/);
-  assert.doesNotMatch(digest, /🧠 Thinking…/);
+  assert.doesNotMatch(digest, /🧠 思考中…/);
   assert.deepEqual(harness.edits[0]?.rich_message?.blocks, [
     {
       type: "paragraph",
       text: [
-        { type: "bold", text: "🧠 Thinking…" },
+        { type: "bold", text: "🧠 思考中…" },
         " ",
         { type: "code", text: "18 字" },
       ],
@@ -636,7 +636,7 @@ test("agent end folds the thinking card the reader may have opened", async () =>
   assert.equal(harness.richSends.length, 1);
   assert.equal(harness.edits.length, 1);
   const serialized = JSON.stringify(harness.richSends[0]?.rich_message);
-  assert.match(serialized, /🧠 Thinking/);
+  assert.match(serialized, /🧠 思考中/);
   assert.match(serialized, /still thinking/);
 
   const fold = harness.edits[0];
@@ -668,7 +668,7 @@ test("agent start refreshes file-backed mode before activity isolation", async (
   );
   await harness.runtime.waitForIdle();
   const activity = JSON.stringify([harness.sends, harness.richSends]);
-  assert.equal(activity.includes("🧠 Thinking"), true);
+  assert.equal(activity.includes("🧠 思考中"), true);
   assert.equal(activity.includes("Read:"), false);
 });
 
@@ -713,7 +713,7 @@ test("thinking and tools modes isolate their activity classes", async () => {
     );
     await harness.runtime.waitForIdle();
     const activity = JSON.stringify([harness.sends, harness.richSends]);
-    assert.equal(activity.includes("🧠 Thinking"), mode === "thinking");
+    assert.equal(activity.includes("🧠 思考中"), mode === "thinking");
     assert.equal(activity.includes("Read:"), mode === "tools");
   }
 });
@@ -721,7 +721,7 @@ test("thinking and tools modes isolate their activity classes", async () => {
 test("reasoning keeps its label on its own line above a collapsed body", () => {
   const text = "**Reviewing data models**\na < b\n<https://example.com>";
   assert.deepEqual(renderTelegramThinkingRichBlocks(text), [
-    { type: "paragraph", text: [{ type: "bold", text: "🧠 Thinking…" }] },
+    { type: "paragraph", text: [{ type: "bold", text: "🧠 思考中…" }] },
     {
       type: "paragraph",
       text: "**Reviewing data models** a < b <https://example.com>",
@@ -746,11 +746,11 @@ test("turn-end digest folds the card and reports size, duration, and tools", () 
       {
         type: "paragraph",
         text: [
-          { type: "bold", text: "🧠 Thought for 42s" },
+          { type: "bold", text: "🧠 思考 42 秒" },
           " ",
           { type: "code", text: "1,234 字" },
           " · ",
-          "🛠 3",
+          "🛠 3 次",
         ],
       },
       {
@@ -778,7 +778,7 @@ test("a 收起 request folds the card through the live runtime", async () => {
 
   assert.equal(await requestTelegramThinkingFold(42, messageId), true);
   const fold = harness.edits.at(-1);
-  assert.match(JSON.stringify(fold?.rich_message), /🧠 Thought for/);
+  assert.match(JSON.stringify(fold?.rich_message), /🧠 思考/);
   // First tap shifts the padding so the edit is not rejected as unchanged.
   assert.deepEqual(fold?.reply_markup, undefined);
   assert.match(
@@ -1040,7 +1040,7 @@ test("reasoning and tool updates retain bounded latest evidence", async () => {
   const rich = harness.richSends.map((body) =>
     JSON.stringify(body.rich_message),
   );
-  const reasoning = rich.find((body) => body.includes("🧠 Thinking")) ?? "";
+  const reasoning = rich.find((body) => body.includes("🧠 思考中")) ?? "";
   assert.doesNotMatch(reasoning, /earlier chars omitted/);
   assert.match(reasoning, /latest-marker/);
   assert.doesNotMatch(reasoning, /old-marker/);
@@ -1126,7 +1126,7 @@ test("reset drops accepted events that have not started processing", async () =>
       return { message_id: 1 };
     },
     async sendRichMessage(body) {
-      if (JSON.stringify(body.rich_message).includes("🧠 Thinking")) {
+      if (JSON.stringify(body.rich_message).includes("🧠 思考中")) {
         await reasoningBlocked;
       }
       richSends.push(body);

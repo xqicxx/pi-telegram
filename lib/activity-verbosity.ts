@@ -348,16 +348,16 @@ export function renderTelegramThinkingRichBlocks(
     state.finished
       ? {
           type: "bold",
-          text: `🧠 Thought for ${Math.max(
+          text: `🧠 思考 ${Math.max(
             1,
             Math.round((state.durationMs ?? 0) / 1000),
-          )}s`,
+          )} 秒`,
         }
-      : { type: "bold", text: "🧠 Thinking…" },
+      : { type: "bold", text: "🧠 思考中…" },
   ];
   if (chars) head.push(" ", { type: "code", text: chars });
   if (state.finished && state.tools && state.tools > 0) {
-    head.push(" · ", `🛠 ${state.tools}`);
+    head.push(" · ", `🛠 ${state.tools} 次`);
   }
   const blocks: TelegramInputRichBlock[] = [{ type: "paragraph", text: head }];
   const preview = state.finished ? undefined : thinkingActivityPreview(text);
