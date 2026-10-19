@@ -366,8 +366,24 @@ export function renderTelegramThinkingRichBlocks(
     head.push(" · ", `🛠 ${state.tools} 次`);
   }
   const blocks: TelegramInputRichBlock[] = [{ type: "paragraph", text: head }];
+  // Short reasoning fits on one line: no disclosure, no controls, just the text.
+  const fitsOnOneLine =
+    !text.includes("\n") && text.length <= TELEGRAM_THINKING_PREVIEW_MAX_CHARS;
+  if (fitsOnOneLine) {
+    const line = text.replace(/\s+/gu, " ").trim();
+    if (line) {
+      blocks.push({
+        type: "paragraph",
+        // A live caret makes the card read as "still writing" without an animation.
+        text: state.finished ? line : `${line} ▍`,
+      });
+    }
+    return blocks;
+  }
   const preview = state.finished ? undefined : thinkingActivityPreview(text);
-  if (preview) blocks.push({ type: "paragraph", text: preview });
+  if (preview) {
+    blocks.push({ type: "paragraph", text: `${preview} ▍` });
+  }
   blocks.push({
     type: "details",
     // Size lives on the headline only — repeating it here read as a duplicate.
@@ -413,12 +429,6 @@ export function thinkingFoldKeyboard(
   };
 }
 
-/**
- * In-bubble closer. The rich `buttons` block sizes to its label, so the label is
- * padded with ideographic spaces to reach across the bubble — the only way to
- * get an inside-the-bubble control that reads as full width. `alternate` shifts
- * the padding by one cell so a repeat tap is a changed payload.
- */
 /**
  * Fold and full-text controls as one row under a divider.
  *

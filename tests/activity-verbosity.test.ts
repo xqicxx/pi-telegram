@@ -579,7 +579,9 @@ test("reasoning uses a persistent collapsed disclosure message", async () => {
   assert.equal(harness.edits[0]?.text, undefined);
   const digest = JSON.stringify(harness.edits[1]?.rich_message);
   assert.match(digest, /🧠 思考/);
-  assert.match(digest, /展开全文/);
+  // Short reasoning fits on one line: no disclosure, the text itself stays visible.
+  assert.doesNotMatch(digest, /展开全文/);
+  assert.match(digest, /Checking \*\*state\*\*/);
   assert.doesNotMatch(digest, /🧠 思考中…/);
   assert.deepEqual(harness.edits[0]?.rich_message?.blocks, [
     {
@@ -590,27 +592,12 @@ test("reasoning uses a persistent collapsed disclosure message", async () => {
         { type: "code", text: "18 字" },
       ],
     },
-    { type: "paragraph", text: "Checking **state**" },
-    {
-      type: "details",
-      summary: "展开全文",
-      blocks: [
-        { type: "pre", text: "Checking **state**" },
-        { type: "divider" },
-        {
-          type: "buttons",
-          align: "center",
-          buttons: [
-            { text: "收起", callback_data: "think:fold:101" },
-            { text: "全文 .txt", callback_data: "think:full:101" },
-          ],
-        },
-      ],
-    },
+    // Short reasoning stays a sentence; no disclosure or controls under it.
+    { type: "paragraph", text: "Checking **state** ▍" },
   ]);
 });
 
-test("agent end folds the thinking card the reader may have opened", async () => {
+test("reasoning uses a persistent collapsed disclosure message", async () => {
   const harness = createHarness({ mode: "thinking" });
   harness.runtime.accept(event(1, { type: "agent-start" }));
   harness.runtime.accept(
@@ -631,9 +618,8 @@ test("agent end folds the thinking card the reader may have opened", async () =>
   const fold = harness.edits[0];
   assert.equal(fold?.text, undefined);
   assert.match(JSON.stringify(fold?.rich_message), /still thinking/);
-  assert.match(JSON.stringify(fold?.rich_message), /展开全文/);
+  assert.doesNotMatch(JSON.stringify(fold?.rich_message), /展开全文/);
   assert.deepEqual(fold?.reply_markup, undefined);
-  assert.match(JSON.stringify(fold?.rich_message), /"type":"buttons"/);
 });
 
 test("agent start refreshes file-backed mode before activity isolation", async () => {
@@ -713,7 +699,7 @@ test("reasoning keeps its label on its own line above a collapsed body", () => {
     { type: "paragraph", text: [{ type: "bold", text: "🧠 思考中…" }] },
     {
       type: "paragraph",
-      text: "**Reviewing data models** a < b <https://example.com>",
+      text: "**Reviewing data models** a < b <https://example.com> ▍",
     },
     {
       type: "details",
@@ -742,11 +728,8 @@ test("turn-end digest folds the card and reports size, duration, and tools", () 
           "🛠 3 次",
         ],
       },
-      {
-        type: "details",
-        summary: "展开全文",
-        blocks: [{ type: "pre", text: "body" }],
-      },
+      // Short reasoning keeps its sentence and drops the disclosure entirely.
+      { type: "paragraph", text: "body" },
     ],
   );
 });
@@ -758,7 +741,9 @@ test("a 收起 request folds the card through the live runtime", async () => {
     event(2, {
       type: "reasoning-delta",
       contentIndex: 0,
-      delta: "long enough reasoning to publish a card",
+      delta:
+        "long enough reasoning to publish a card: it keeps going past the one-line" +
+        " preview limit, so the card offers the fold and full-text controls",
     }),
   );
   await harness.runtime.waitForIdle();
@@ -768,7 +753,7 @@ test("a 收起 request folds the card through the live runtime", async () => {
   assert.equal(await requestTelegramThinkingFold(42, messageId), true);
   const fold = harness.edits.at(-1);
   assert.match(JSON.stringify(fold?.rich_message), /🧠 思考/);
-  // First tap shifts the padding so the edit is not rejected as unchanged.
+  // First tap marks itself so the edit is not rejected as unchanged.
   assert.deepEqual(fold?.reply_markup, undefined);
   assert.match(
     JSON.stringify(fold?.rich_message),
