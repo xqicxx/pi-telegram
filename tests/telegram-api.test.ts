@@ -1941,6 +1941,36 @@ test("Telegram streaming downloads remove partial files after limit failures", a
   }
 });
 
+test("Telegram file downloads create unavailable placeholder when getFile returns file is too big", async () => {
+  const tempDir = await mkdtemp(
+    join(tmpdir(), "pi-telegram-download-too-big-"),
+  );
+  const restoreFetch = setApiTestFetch(async () => {
+    return new Response(
+      JSON.stringify({
+        ok: false,
+        error_code: 400,
+        description: "Bad Request: file is too big",
+      }),
+      { status: 400, headers: { "content-type": "application/json" } },
+    );
+  });
+  try {
+    const filePath = await downloadTelegramFile(
+      "123:abc",
+      "file-id-huge",
+      "app.xapk",
+      tempDir,
+    );
+    assert.match(filePath, /\.unavailable\.txt$/);
+    const content = await readFile(filePath, "utf8");
+    assert.match(content, /Telegram file download unavailable/);
+    assert.match(content, /file is too big/);
+  } finally {
+    restoreFetch();
+  }
+});
+
 test("Telegram API helpers reject malformed successful responses", async () => {
   const restoreFetch = setApiTestFetch(async () => {
     return createMalformedApiTextResponse("not json");

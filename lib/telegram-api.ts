@@ -1864,12 +1864,28 @@ export async function downloadTelegramFile(
   options?: TelegramFileDownloadOptions,
 ): Promise<string> {
   const configuredBotToken = assertTelegramBotTokenConfigured(botToken);
-  const file = await callTelegram<TelegramGetFileResult>(
-    configuredBotToken,
-    "getFile",
-    { file_id: fileId },
-    { signal: options?.signal },
-  );
+  let file: TelegramGetFileResult;
+  try {
+    file = await callTelegram<TelegramGetFileResult>(
+      configuredBotToken,
+      "getFile",
+      { file_id: fileId },
+      { signal: options?.signal },
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/file is too big/i.test(message)) {
+      await mkdir(tempDir, { recursive: true, mode: 0o700 });
+      const targetPath = join(
+        tempDir,
+        `${sanitizeFileName(suggestedName)}.unavailable.txt`,
+      );
+      const placeholder = `[Telegram file download unavailable: The file "${suggestedName}" exceeds the Telegram Bot API 20MB download limit (Telegram API returned: ${message}). To analyze this file, please provide or place it directly in the local file system.]\n`;
+      await writeFile(targetPath, placeholder, "utf8");
+      return targetPath;
+    }
+    throw error;
+  }
   assertTelegramFileSizeWithinLimit(file.file_size, options?.maxFileSizeBytes);
   await mkdir(tempDir, { recursive: true, mode: 0o700 });
   // Names carry scope and message id, so the same message maps to the same path; publish by rename.
@@ -2332,6 +2348,24 @@ export function createTelegramBridgeApiRuntime(
           },
         );
       } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (/file is too big|exceeds size limit/i.test(message)) {
+          const targetName = source
+            ? createTelegramAttachmentFileName(
+                source,
+                suggestedName,
+                deps.getBotScope?.(),
+              )
+            : suggestedName;
+          const targetPath = join(
+            deps.tempDir,
+            `${sanitizeFileName(targetName)}.unavailable.txt`,
+          );
+          await mkdir(deps.tempDir, { recursive: true, mode: 0o700 });
+          const placeholder = `[Telegram file download unavailable: The file "${suggestedName}" exceeds the download size limit (${message}). To analyze this file, please provide or place it directly in the local file system.]\n`;
+          await writeFile(targetPath, placeholder, "utf8");
+          return targetPath;
+        }
         deps.recordRuntimeEvent(
           "download",
           error,
