@@ -596,24 +596,13 @@ test("reasoning uses a persistent collapsed disclosure message", async () => {
       summary: "展开全文",
       blocks: [
         { type: "pre", text: "Checking **state**" },
+        { type: "divider" },
         {
           type: "buttons",
           align: "center",
           buttons: [
-            {
-              text: `收起 ${"─".repeat(20)}`,
-              callback_data: "think:fold:101",
-            },
-          ],
-        },
-        {
-          type: "buttons",
-          align: "center",
-          buttons: [
-            {
-              text: `全文 .txt ${"─".repeat(20)}`,
-              callback_data: "think:full:101",
-            },
+            { text: "收起", callback_data: "think:fold:101" },
+            { text: "全文 .txt", callback_data: "think:full:101" },
           ],
         },
       ],

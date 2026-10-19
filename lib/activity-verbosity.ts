@@ -379,8 +379,7 @@ export function renderTelegramThinkingRichBlocks(
       ...(state.foldMessageId === undefined
         ? []
         : [
-            thinkingFoldButtonBlock(state.foldMessageId, state.foldHighlighted),
-            thinkingFullButtonBlock(state.foldMessageId),
+            ...thinkingControlBlocks(state.foldMessageId, state.foldHighlighted),
           ]),
     ],
   });
@@ -420,40 +419,38 @@ export function thinkingFoldKeyboard(
  * get an inside-the-bubble control that reads as full width. `alternate` shifts
  * the padding by one cell so a repeat tap is a changed payload.
  */
-const TELEGRAM_THINKING_FOLD_RULE = "─".repeat(20);
-
-/** Companion control: ship the unbounded reasoning as a .txt document. */
-function thinkingFullButtonBlock(messageId: number): TelegramInputRichBlock {
-  return {
-    type: "buttons",
-    align: "center",
-    buttons: [
-      {
-        text: `全文 .txt ${TELEGRAM_THINKING_FOLD_RULE}`,
-        callback_data: `${TELEGRAM_THINKING_FULL_CALLBACK_PREFIX}${messageId}`,
-      },
-    ],
-  };
-}
-
-function thinkingFoldButtonBlock(
+/**
+ * Fold and full-text controls as one row under a divider.
+ *
+ * Telegram sizes a rich-bubble button to its label and offers no width switch,
+ * so padding a label with rule glyphs (the old `收起 ─────` trick) only produced
+ * a fake rule that read as decoration. A divider plus a two-button row keeps the
+ * card tidy, gives both actions the same weight, and stays inside the bubble.
+ * `style` is the only payload-safe way to differ between repeat taps: Telegram
+ * trims trailing spaces and rejects an edit whose payload did not change.
+ */
+function thinkingControlBlocks(
   messageId: number,
   alternate = false,
-): TelegramInputRichBlock {
-  return {
-    type: "buttons",
-    align: "center",
-    buttons: [
-      {
-        // Trailing spaces are trimmed by the client, so the label is widened
-        // with rule glyphs; the style toggle keeps repeat taps a *changed*
-        // payload, which is what Telegram requires to accept the fold edit.
-        text: `收起 ${TELEGRAM_THINKING_FOLD_RULE}`,
-        ...(alternate ? { style: "primary" as const } : {}),
-        callback_data: `${TELEGRAM_THINKING_FOLD_CALLBACK_PREFIX}${messageId}`,
-      },
-    ],
-  };
+): TelegramInputRichBlock[] {
+  return [
+    { type: "divider" },
+    {
+      type: "buttons",
+      align: "center",
+      buttons: [
+        {
+          text: "收起",
+          ...(alternate ? { style: "primary" as const } : {}),
+          callback_data: `${TELEGRAM_THINKING_FOLD_CALLBACK_PREFIX}${messageId}`,
+        },
+        {
+          text: "全文 .txt",
+          callback_data: `${TELEGRAM_THINKING_FULL_CALLBACK_PREFIX}${messageId}`,
+        },
+      ],
+    },
+  ];
 }
 
 /** Taps seen per card, so the fold payload can differ on every tap. */
