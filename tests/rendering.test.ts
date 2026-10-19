@@ -47,6 +47,19 @@ test("HTML helpers do not reopen void tags across chunks", () => {
   assert.deepEqual(chunks, ["a<br>bbb", "bbbbbbbb".slice(0, 7)]);
 });
 
+test("HTML helpers break long text at line ends instead of mid-sentence", () => {
+  const text = `${"甲".repeat(40)}\n${"乙".repeat(40)}\n${"丙".repeat(40)}`;
+  const chunks = chunkHtmlPreservingTags(text, 60);
+  assert.ok(chunks.length >= 2, "expected the message to be split");
+  assert.equal(chunks[0]?.endsWith("\n"), true, "first chunk should end on a line break");
+  assert.equal(
+    chunks.every((chunk) => chunk.length <= 60),
+    true,
+    "no chunk may exceed the limit",
+  );
+  assert.equal(chunks.join("").replace(/\n/gu, ""), "甲".repeat(40) + "乙".repeat(40) + "丙".repeat(40));
+});
+
 test("Malformed and boundary markdown renders safely", () => {
   const cases = [
     "",

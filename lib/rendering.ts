@@ -66,6 +66,32 @@ function updateOpenHtmlTags(tag: string, openTags: OpenHtmlTag[]): void {
   openTags.push({ name, openTag: tag });
 }
 
+/**
+ * A long message should not break mid-sentence: look for the last paragraph,
+ * line, sentence or word boundary inside the slice before cutting. Returns the
+ * exclusive cut index, or undefined when only a hard cut is possible.
+ */
+function findHtmlSoftBreak(slice: string): number | undefined {
+  const minKeep = Math.floor(slice.length * 0.55);
+  const patterns = [/\n\n/gu, /\n/gu, /[。！？；!?;]/gu, /[，、,]/gu, /\s/gu];
+  for (const pattern of patterns) {
+    let last: number | undefined;
+    for (const match of slice.matchAll(pattern)) {
+      const end = (match.index ?? 0) + match[0].length;
+      if (end > minKeep) last = end;
+    }
+    if (last !== undefined) return last;
+  }
+  return undefined;
+}
+
+/** Never split a surrogate pair, which would corrupt an emoji at the seam. */
+function safeCutIndex(slice: string, cut: number): number {
+  if (cut <= 0) return cut;
+  const code = slice.charCodeAt(cut - 1);
+  return code >= 0xd800 && code <= 0xdbff ? cut - 1 : cut;
+}
+
 export function chunkHtmlPreservingTags(
   html: string,
   maxLength: number,
@@ -90,7 +116,13 @@ export function chunkHtmlPreservingTags(
         flushCurrent();
         continue;
       }
-      const slice = remaining.slice(0, available);
+      let slice = remaining.slice(0, available);
+      if (remaining.length > available) {
+        const cut = findHtmlSoftBreak(slice);
+        if (cut !== undefined && safeCutIndex(slice, cut) > 0) {
+          slice = slice.slice(0, safeCutIndex(slice, cut));
+        }
+      }
       current += slice;
       remaining = remaining.slice(slice.length);
       if (remaining.length > 0) flushCurrent();
