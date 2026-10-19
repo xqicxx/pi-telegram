@@ -179,6 +179,12 @@ function formatToolActivityLabel(label: string): string {
     .join(" ");
 }
 
+/** Card status in the same language as the thinking headline. */
+function toolStatusLabel(tool: ToolActivity): string {
+  if (!tool.complete) return "运行中";
+  return tool.isError ? "失败" : "完成";
+}
+
 function renderToolActivityHtml(tool: ToolActivity): string {
   const evidence = [`"arguments": ${tool.args}`];
   if (tool.droppedUpdates > 0) {
@@ -190,7 +196,7 @@ function renderToolActivityHtml(tool: ToolActivity): string {
   if (tool.complete && tool.result !== undefined) {
     evidence.push(`"${tool.isError ? "error" : "result"}": ${tool.result}`);
   }
-  const status = tool.complete ? (tool.isError ? "failed" : "done") : "running";
+  const status = toolStatusLabel(tool);
   return [
     `<b>${escapeHtml(formatToolActivityLabel(tool.name))}:</b> <code>${status}</code>`,
     `<blockquote expandable>${escapeActivityEvidenceHtml(evidence.join("\n\n"))}</blockquote>`,
@@ -240,24 +246,24 @@ function createToolActivityDetail(
 function renderToolActivityRichBlocks(
   tool: ToolActivity,
 ): TelegramInputRichBlock[] {
-  const status = tool.complete ? (tool.isError ? "failed" : "done") : "running";
+  const status = toolStatusLabel(tool);
   // Arguments start collapsed: the row stays one line until the operator taps it.
   const evidenceBlocks: TelegramInputRichBlock[] = [
-    createToolActivityDetail("arguments", tool.args),
+    createToolActivityDetail("参数", tool.args),
   ];
   tool.updates.forEach((update, index) => {
     const number = tool.droppedUpdates + index + 1;
     const omitted =
       index === 0 && tool.droppedUpdates > 0
-        ? ` (${tool.droppedUpdates} earlier omitted)`
+        ? `（较早 ${tool.droppedUpdates} 条已省略）`
         : "";
     evidenceBlocks.push(
-      createToolActivityDetail(`update ${number}${omitted}`, update),
+      createToolActivityDetail(`更新 ${number}${omitted}`, update),
     );
   });
   if (tool.complete && tool.result !== undefined) {
     evidenceBlocks.push(
-      createToolActivityDetail(tool.isError ? "error" : "result", tool.result),
+      createToolActivityDetail(tool.isError ? "错误" : "结果", tool.result),
     );
   }
   const hint = toolActivityArgumentHint(tool);

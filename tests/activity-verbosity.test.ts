@@ -398,7 +398,7 @@ test("tool Rich activity separates arguments, updates, and result details", () =
       summary: [
         { type: "bold", text: "Bash:" },
         " ",
-        { type: "code", text: "done" },
+        { type: "code", text: "完成" },
         " ",
         // A collapsed row still names its subject (first string argument).
         { type: "code", text: "npm test" },
@@ -406,7 +406,7 @@ test("tool Rich activity separates arguments, updates, and result details", () =
       blocks: [
         {
           type: "details",
-          summary: { type: "code", text: "arguments" },
+          summary: { type: "code", text: "参数" },
           blocks: [
             {
               type: "pre",
@@ -419,7 +419,7 @@ test("tool Rich activity separates arguments, updates, and result details", () =
           type: "details",
           summary: {
             type: "code",
-            text: "update 3 (2 earlier omitted)",
+            text: "更新 3（较早 2 条已省略）",
           },
           blocks: [
             { type: "pre", text: '{\n  "line": 1\n}', language: "json" },
@@ -427,7 +427,7 @@ test("tool Rich activity separates arguments, updates, and result details", () =
         },
         {
           type: "details",
-          summary: { type: "code", text: "result" },
+          summary: { type: "code", text: "结果" },
           blocks: [
             { type: "pre", text: '{\n  "ok": true\n}', language: "json" },
           ],
@@ -482,7 +482,7 @@ test("tool evidence renders as ordinary expandable HTML fallback", () => {
     },
   ]);
 
-  assert.match(html, /^<b>Exec&lt;script&gt;:<\/b> <code>done<\/code>/);
+  assert.match(html, /^<b>Exec&lt;script&gt;:<\/b> <code>完成<\/code>/);
   assert.match(html, /<blockquote expandable>/);
   assert.match(html, /"arguments": \{\n {2}"command"/);
   assert.equal(html.includes("https://\u200bexample.com/result"), true);
@@ -511,8 +511,8 @@ test("tool evidence renders as ordinary expandable HTML fallback", () => {
       complete: true,
     },
   ]);
-  assert.match(statuses, /<code>running<\/code>/);
-  assert.match(statuses, /<code>failed<\/code>/);
+  assert.match(statuses, /<code>运行中<\/code>/);
+  assert.match(statuses, /<code>失败<\/code>/);
 });
 
 test("known-safe Rich rejection falls back to the HTML tool message", async () => {
@@ -893,11 +893,11 @@ test("tool Rich details keep compact arrays of objects", async () => {
   await harness.runtime.waitForIdle();
 
   const rich = JSON.stringify(harness.richSends[0]?.rich_message);
-  assert.match(rich, /arguments/);
-  assert.match(rich, /update 1/);
-  assert.match(rich, /result/);
+  assert.match(rich, /参数/);
+  assert.match(rich, /更新 1/);
+  assert.match(rich, /结果/);
   assert.match(rich, /\\"content\\":\s*\[/);
-  assert.match(rich, /\\"result\\"|result/);
+  assert.match(rich, /结果/);
 });
 
 test("assistant boundaries, capacity, and authority replacement fence batches", async () => {
@@ -1045,7 +1045,7 @@ test("reasoning and tool updates retain bounded latest evidence", async () => {
   assert.match(reasoning, /latest-marker/);
   assert.doesNotMatch(reasoning, /old-marker/);
   const tool = rich.find((body) => body.includes("Exec:")) ?? "";
-  assert.match(tool, /3 earlier omitted/);
+  assert.match(tool, /较早 3 条已省略/);
   assert.doesNotMatch(tool, /update-0/);
   assert.match(tool, /update-6/);
 });
@@ -1098,7 +1098,7 @@ test("reasoning edits are throttled to a minimum interval between frames", async
     event(6, {
       type: "reasoning-end",
       contentIndex: 0,
-      text: "done",
+      text: "完成",
     }),
   );
   await harness.runtime.waitForIdle();
