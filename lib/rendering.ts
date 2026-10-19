@@ -6,10 +6,12 @@
 
 export const MAX_MESSAGE_LENGTH = 4096;
 
-const TELEGRAM_TABLE_GRAPHEME_SEGMENTER =
-  typeof Intl.Segmenter === "function"
-    ? new Intl.Segmenter(undefined, { granularity: "grapheme" })
-    : undefined;
+const SEGMENTER_CTOR: typeof Intl.Segmenter | undefined = (
+  Intl as { Segmenter?: typeof Intl.Segmenter }
+).Segmenter;
+const TELEGRAM_TABLE_GRAPHEME_SEGMENTER = SEGMENTER_CTOR
+  ? new SEGMENTER_CTOR(undefined, { granularity: "grapheme" })
+  : undefined;
 const TELEGRAM_TABLE_EMOJI_GRAPHEME_PATTERN =
   /\p{Extended_Pictographic}|\p{Emoji_Presentation}|\p{Regional_Indicator}/u;
 
@@ -36,7 +38,7 @@ function getHtmlTagName(tag: string): string | undefined {
 }
 
 function isHtmlClosingTag(tag: string): boolean {
-  return /^<\//.test(tag);
+  return tag.startsWith("</");
 }
 
 function isHtmlSelfClosingTag(tag: string): boolean {
@@ -44,8 +46,8 @@ function isHtmlSelfClosingTag(tag: string): boolean {
 }
 
 function getHtmlClosingTags(openTags: OpenHtmlTag[]): string {
-  return [...openTags]
-    .reverse()
+  return openTags
+    .toReversed()
     .map((tag) => `</${tag.name}>`)
     .join("");
 }
@@ -399,7 +401,7 @@ function stripInlineMarkdownToPlainText(text: string): string {
   result = result.replace(/(\*\*|__)(.+?)\1/g, "$2");
   result = result.replace(/(\*|_)(.+?)\1/g, "$2");
   result = result.replace(/~~(.+?)~~/g, "$1");
-  result = result.replace(/\\([\\`*_{}\[\]()#+\-.!>~|])/g, "$1");
+  result = result.replace(/\\([\\`*_{}[\]()#+\-.!>~|])/g, "$1");
   return result;
 }
 
@@ -612,7 +614,7 @@ function renderInlineMarkdown(
   result = stashInlineMarkdownCodeSpans(result, tokenState);
   result = escapeHtml(result);
   result = applyInlineMarkdownStyles(result);
-  result = result.replace(/\\([\\`*_{}\[\]()#+\-.!>~|])/g, "$1");
+  result = result.replace(/\\([\\`*_{}[\]()#+\-.!>~|])/g, "$1");
   return restoreInlineMarkdownTokens(result, tokenState);
 }
 
