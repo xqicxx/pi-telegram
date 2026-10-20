@@ -1169,3 +1169,34 @@ test("Thinking card bounds the expanded body and offers the full text", () => {
   );
   assert.ok(json.includes("收起"), "fold control unchanged");
 });
+test("each thinking segment reports its own duration, not the whole turn", async () => {
+  const harness = createHarness({ mode: "thinking" });
+  harness.runtime.accept(event(1, { type: "agent-start" }));
+  await harness.runtime.waitForIdle();
+
+  harness.runtime.accept(
+    event(2, { type: "reasoning-delta", contentIndex: 0, delta: "first segment of reasoning" }),
+  );
+  await harness.runtime.waitForIdle();
+  harness.advanceNow(30_000);
+  harness.runtime.accept(
+    event(3, { type: "reasoning-end", contentIndex: 0, text: "first segment of reasoning" }),
+  );
+  await harness.runtime.waitForIdle();
+  assert.match(JSON.stringify(harness.edits.at(-1)?.rich_message), /思考 (29|30) 秒/);
+
+  // A tool turn follows, then the model thinks again: the second card times only itself.
+  harness.advanceNow(5_000);
+  harness.runtime.accept(
+    event(4, { type: "reasoning-delta", contentIndex: 1, delta: "second segment" }),
+  );
+  await harness.runtime.waitForIdle();
+  harness.advanceNow(2_000);
+  harness.runtime.accept(
+    event(5, { type: "reasoning-end", contentIndex: 1, text: "second segment" }),
+  );
+  await harness.runtime.waitForIdle();
+  const second = JSON.stringify(harness.edits.at(-1)?.rich_message);
+  assert.match(second, /思考 [23] 秒/);
+  assert.doesNotMatch(second, /思考 3[0-9] 秒/);
+});
