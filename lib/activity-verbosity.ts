@@ -1060,6 +1060,15 @@ export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
       // has to scroll back to the summary row to close a long wall of text.
       const finished = takeReasoningFold();
       if (finished) {
+        // The timer starts at this segment's first delta, so pin the digest to the segment's
+        // real length before folding: a turn that thinks, runs a tool, then thinks again used
+        // to report the whole turn as "思考 N 秒" on the second card.
+        if (reasoningStartedMs !== undefined) {
+          finished.durationMs = Math.max(
+            finished.durationMs,
+            getNowMs() - reasoningStartedMs,
+          );
+        }
         await foldReasoningCard(finished, event, acceptedGeneration);
         if (!isCurrent(acceptedGeneration, admittedAuthority)) return;
       }
@@ -1070,6 +1079,7 @@ export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
       lastReasoningPublishMs = 0;
       reasoningMessage = undefined;
       reasoningBlocked = false;
+      reasoningStartedMs = undefined; // next segment measures itself, not the whole turn
       return;
     }
     if (event.type === "tool-start") {
