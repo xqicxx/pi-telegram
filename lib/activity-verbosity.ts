@@ -181,8 +181,8 @@ function formatToolActivityLabel(label: string): string {
 
 /** Card status in the same language as the thinking headline. */
 function toolStatusLabel(tool: ToolActivity): string {
-  if (!tool.complete) return "运行中";
-  return tool.isError ? "失败" : "完成";
+  if (!tool.complete) return "Running";
+  return tool.isError ? "Failed" : "Done";
 }
 
 function renderToolActivityHtml(tool: ToolActivity): string {
@@ -249,7 +249,7 @@ function renderToolActivityRichBlocks(
   const status = toolStatusLabel(tool);
   // Arguments start collapsed: the row stays one line until the operator taps it.
   const evidenceBlocks: TelegramInputRichBlock[] = [
-    createToolActivityDetail("参数", tool.args),
+    createToolActivityDetail("Args", tool.args),
   ];
   tool.updates.forEach((update, index) => {
     const number = tool.droppedUpdates + index + 1;
@@ -258,12 +258,12 @@ function renderToolActivityRichBlocks(
         ? `（较早 ${tool.droppedUpdates} 条已省略）`
         : "";
     evidenceBlocks.push(
-      createToolActivityDetail(`更新 ${number}${omitted}`, update),
+      createToolActivityDetail(`Update ${number}${omitted}`, update),
     );
   });
   if (tool.complete && tool.result !== undefined) {
     evidenceBlocks.push(
-      createToolActivityDetail(tool.isError ? "错误" : "结果", tool.result),
+      createToolActivityDetail(tool.isError ? "Error" : "Result", tool.result),
     );
   }
   const hint = toolActivityArgumentHint(tool);
@@ -332,7 +332,7 @@ export interface TelegramThinkingCardState {
 }
 
 const formatThinkingChars = (chars: number): string =>
-  `${chars.toLocaleString("en-US")} 字`;
+  `${chars.toLocaleString("en-US")} chars`;
 
 /**
  * Thinking message: a headline line, the newest reasoning while it streams, and
@@ -354,16 +354,16 @@ export function renderTelegramThinkingRichBlocks(
     state.finished
       ? {
           type: "bold",
-          text: `🧠 思考 ${Math.max(
+          text: `🧠 Thought ${Math.max(
             1,
             Math.round((state.durationMs ?? 0) / 1000),
-          )} 秒`,
+          )}s`,
         }
-      : { type: "bold", text: "🧠 思考中…" },
+      : { type: "bold", text: "🧠 Thinking…" },
   ];
   if (chars) head.push(" ", { type: "code", text: chars });
   if (state.finished && state.tools && state.tools > 0) {
-    head.push(" · ", `🛠 ${state.tools} 次`);
+    head.push(" · ", `🛠 ${state.tools} calls`);
   }
   const blocks: TelegramInputRichBlock[] = [{ type: "paragraph", text: head }];
   // Short reasoning fits on one line: no disclosure, no controls, just the text.
@@ -387,7 +387,7 @@ export function renderTelegramThinkingRichBlocks(
   blocks.push({
     type: "details",
     // Size lives on the headline only — repeating it here read as a duplicate.
-    summary: "展开全文",
+    summary: "Show full output",
     blocks: [
       // Monospace box: raw reasoning is not prose, and the code block keeps its
       // markers, indentation, and line breaks from turning into a text wall.
@@ -421,7 +421,7 @@ export function thinkingFoldKeyboard(
     inline_keyboard: [
       [
         {
-          text: alternate ? "收起 " : "收起",
+          text: alternate ? "Collapse " : "Collapse",
           callback_data: `${TELEGRAM_THINKING_FOLD_CALLBACK_PREFIX}${messageId}`,
         },
       ],
@@ -450,12 +450,12 @@ function thinkingControlBlocks(
       align: "center",
       buttons: [
         {
-          text: "收起",
+          text: "Collapse",
           ...(alternate ? { style: "primary" as const } : {}),
           callback_data: `${TELEGRAM_THINKING_FOLD_CALLBACK_PREFIX}${messageId}`,
         },
         {
-          text: "全文 .txt",
+          text: "full.txt",
           callback_data: `${TELEGRAM_THINKING_FULL_CALLBACK_PREFIX}${messageId}`,
         },
       ],
@@ -543,7 +543,7 @@ export async function requestTelegramThinkingFullText(
 export function clipTelegramThinkingBody(text: string): string {
   if (text.length <= TELEGRAM_THINKING_EXPANDED_MAX_CHARS) return text;
   const omitted = text.length - TELEGRAM_THINKING_EXPANDED_MAX_CHARS;
-  return `${text.slice(0, TELEGRAM_THINKING_EXPANDED_MAX_CHARS)}\n…\n（还有 ${omitted} 字，点「全文 .txt」）`;
+  return `${text.slice(0, TELEGRAM_THINKING_EXPANDED_MAX_CHARS)}\n…\n(another ${omitted} chars — tap "full.txt")`;
 }
 
 export function registerTelegramThinkingFoldRequest(
@@ -856,7 +856,7 @@ export function createTelegramActivityVerbosityRuntime<TAuthority>(deps: {
     }
   };
 
-  // The "收起" button under a card asks the owning runtime to fold it; the card
+  // The "Collapse" button under a card asks the owning runtime to fold it; the card
   // text is cached above because the tap can arrive long after the turn ended.
   const unregisterThinkingFoldRequest = registerTelegramThinkingFoldRequest(
     async (chatId, messageId) => {

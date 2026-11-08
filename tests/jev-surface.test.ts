@@ -90,7 +90,7 @@ test('渲染：每行一个注释，标签带 emoji + 空格，提示进矩阵�
   );
 });
 
-test('渲染也是失败即失败：标签缺 emoji / 提示含 | 或 {} / 空行 / 超过四个都要抛', () => {
+test('渲染也是Failed即Failed：标签缺 emoji / 提示含 | 或 {} / 空行 / 超过四个都要抛', () => {
   assert.throws(() => renderTelegramSurface([[{ label: '看细节', prompt: 'x' }]]), /emoji/);
   assert.throws(() => renderTelegramSurface([[{ label: '🔍 看细节', prompt: '含 | 竖线' }]]), /矩阵/);
   assert.throws(() => renderTelegramSurface([[{ label: '🔍 看细节', prompt: '含 {大括号}' }]]), /矩阵/);
@@ -102,7 +102,7 @@ test('渲染也是失败即失败：标签缺 emoji / 提示含 | 或 {} / 空�
   );
 });
 
-test('失败即失败：概率不归一 / choice 与 argmax 不符 / 缺题 都要抛', () => {
+test('Failed即Failed：概率不归一 / choice 与 argmax 不符 / 缺题 都要抛', () => {
   assert.throws(() => projectSurface({ keep_a: { type: 'choice', choice: 'keep', confidence: 0.6, probabilities: { keep: 0.6, drop: 0.6 } }, keep_b: answer('keep', 0.9), keep_c: answer('drop', 0.1) }, candidates), /归一/);
   assert.throws(() => projectSurface({ keep_a: { type: 'choice', choice: 'keep', confidence: 0.4, probabilities: { keep: 0.4, drop: 0.6 } }, keep_b: answer('keep', 0.9), keep_c: answer('drop', 0.1) }, candidates), /不一致/);
   assert.throws(() => projectSurface({ keep_b: answer('keep', 0.9), keep_c: answer('drop', 0.1) }, candidates), /非法/);

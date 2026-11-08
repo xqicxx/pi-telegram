@@ -620,6 +620,17 @@ function restoreInlineMarkdownTokens(
   );
 }
 
+/**
+ * Renders `{{time:2026-12-06T09:00:00+08:00}}` as a Telegram date-time entity, which
+ * clients show in the reader’s own language and time zone.
+ */
+function renderTelegramTimeTag(value: string): string | undefined {
+  const unixMs = Date.parse(value);
+  if (!Number.isFinite(unixMs)) return undefined;
+  const unix = Math.floor(unixMs / 1000);
+  return `<tg-time unix="${unix}" format="wDT">${escapeHtml(value)}</tg-time>`;
+}
+
 function renderInlineMarkdown(
   text: string,
   options: { allowLinks?: boolean } = {},
@@ -631,9 +642,17 @@ function renderInlineMarkdown(
     options.allowLinks !== false,
   );
   result = stashInlineMarkdownCodeSpans(result, tokenState);
+  const timeTags: string[] = [];
+  result = result.replace(/\{\{time:([^}]+)\}\}/gu, (match, value: string) => {
+    const tag = renderTelegramTimeTag(value.trim());
+    if (!tag) return match;
+    timeTags.push(tag);
+    return `\u0000tgtime${timeTags.length - 1}\u0000`;
+  });
   result = escapeHtml(result);
   result = applyInlineMarkdownStyles(result);
   result = result.replace(/\\([\\`*_{}[\]()#+\-.!>~|])/g, "$1");
+  result = result.replace(/\u0000tgtime(\d+)\u0000/g, (_m, index: string) => timeTags[Number(index)] ?? "");
   return restoreInlineMarkdownTokens(result, tokenState);
 }
 
@@ -672,7 +691,15 @@ function renderMarkdownTextPiece(piece: string): string {
   const heading = matchMarkdownHeadingLine(piece);
   if (heading) {
     const indent = buildListIndent(Math.floor((heading[1] ?? "").length / 2));
-    return `${indent}<b>${renderInlineMarkdown(heading[2] ?? "")}</b>`;
+    const level = piece.trimStart().match(/^#+/)?.[0].length ?? 1;
+    const text = renderInlineMarkdown(heading[2] ?? "");
+    const markup =
+      level === 1
+        ? `<b><u>${text}</u></b>`
+        : level === 2
+          ? `<b>${text}</b>`
+          : `<b><i>${text}</i></b>`;
+    return `${indent}${markup}`;
   }
   const task = piece.match(/^(\s*)([-*+]|\d+\.)\s+\[([ xX])\]\s+(.+)$/);
   if (task) {
@@ -681,19 +708,19 @@ function renderMarkdownTextPiece(piece: string): string {
     const checkboxMarker =
       (task[3] ?? " ").toLowerCase() === "x" ? "[x]" : "[ ]";
     const taskPrefix = isMarkdownNumberedListMarker(listMarker)
-      ? `<code>${listMarker}</code> <code>${checkboxMarker}</code>`
-      : `<code>${checkboxMarker}</code>`;
+      ? `${listMarker} ${checkboxMarker}`
+      : checkboxMarker;
     return `${indent}${taskPrefix} ${renderInlineMarkdown(task[4] ?? "")}`;
   }
   const bullet = piece.match(/^(\s*)[-*+]\s+(.+)$/);
   if (bullet) {
     const indent = buildListIndent(Math.floor((bullet[1] ?? "").length / 2));
-    return `${indent}<code>-</code> ${renderInlineMarkdown(bullet[2] ?? "")}`;
+    return `${indent}• ${renderInlineMarkdown(bullet[2] ?? "")}`;
   }
   const numbered = piece.match(/^(\s*)(\d+)\.\s+(.+)$/);
   if (numbered) {
     const indent = buildListIndent(Math.floor((numbered[1] ?? "").length / 2));
-    return `${indent}<code>${numbered[2]}.</code> ${renderInlineMarkdown(numbered[3] ?? "")}`;
+    return `${indent}${numbered[2]}. ${renderInlineMarkdown(numbered[3] ?? "")}`;
   }
   const quote = piece.match(/^>\s?(.+)$/);
   if (quote) {
@@ -918,8 +945,9 @@ function renderMarkdownQuoteBlock(lines: string[]): string[] {
       return `${nestedIndent}${parsed.content}`;
     })
     .join("\n");
+  const quoteTag = lines.length > 3 ? "blockquote expandable" : "blockquote";
   return chunkRenderedHtmlLines(renderMarkdownTextLines(inner), {
-    open: "<blockquote>",
+    open: `<${quoteTag}>`,
     close: "</blockquote>",
   });
 }

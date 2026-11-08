@@ -6122,12 +6122,12 @@ export function createTelegramInboundRouteRuntime(deps) {
             const chatId = query.message?.chat?.id;
             const messageId = Number(query.data.slice(Activity.TELEGRAM_THINKING_FOLD_CALLBACK_PREFIX.length));
             if (typeof chatId !== "number" || !Number.isInteger(messageId)) {
-                await deps.answerCallbackQuery(query.id, "卡片已过期");
+                await deps.answerCallbackQuery(query.id, "Card expired");
                 return;
             }
             // Acknowledge before folding: the fold edit queues behind whatever else
             // this chat is receiving, and the tap should feel answered at once.
-            await deps.answerCallbackQuery(query.id, "收起中…");
+            await deps.answerCallbackQuery(query.id, "Collapsing…");
             void Activity.requestTelegramThinkingFold(chatId, messageId).catch(() => { });
             return;
         }
@@ -6141,10 +6141,10 @@ export function createTelegramInboundRouteRuntime(deps) {
                 ? await Activity.requestTelegramThinkingFullText(chatId, messageId)
                 : undefined;
             if (typeof chatId !== "number" || !text || !deps.sendDocumentText) {
-                await deps.answerCallbackQuery(query.id, "卡片已过期");
+                await deps.answerCallbackQuery(query.id, "Card expired");
                 return;
             }
-            await deps.answerCallbackQuery(query.id, "发送全文…");
+            await deps.answerCallbackQuery(query.id, "Sending full text…");
             try {
                 await deps.sendDocumentText(chatId, `thinking-${messageId}.txt`, text);
             }

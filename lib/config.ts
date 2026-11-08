@@ -206,6 +206,8 @@ export interface TelegramConfig {
     rendering?: TelegramAssistantRenderingMode;
     activity?: TelegramActivityVerbosity;
     timeInjection?: TelegramTimeMode;
+    /** Send a message effect on the final reply of a turn. true = celebration, string = effect id, false = off. */
+    completionEffect?: boolean | string;
     /** @deprecated use activity */
     activityVerbosity?: TelegramActivityVerbosity;
   };
@@ -1020,6 +1022,20 @@ function createTelegramAssistantRenderingModeSetter(
     };
     configStore.set(config);
     await configStore.persist(config);
+  };
+}
+
+export const TELEGRAM_COMPLETION_EFFECT_CELEBRATION = "5046509860389126442";
+
+export function createTelegramCompletionEffectIdGetter(
+  configStore: Pick<TelegramConfigStore, "get">,
+): () => string | undefined {
+  return () => {
+    const value = configStore.get().assistant?.completionEffect;
+    if (value === false) return undefined;
+    if (typeof value === "string" && value.trim().length > 0)
+      return value.trim();
+    return TELEGRAM_COMPLETION_EFFECT_CELEBRATION;
   };
 }
 

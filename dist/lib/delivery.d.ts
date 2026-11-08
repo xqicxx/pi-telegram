@@ -81,6 +81,7 @@ export interface TelegramDeliveryRenderedChunk {
 export interface TelegramDeliveryTransportOptions {
     replyToMessageId?: number;
     replyMarkup?: TelegramReplyMarkup | null;
+    isLast?: boolean;
 }
 /** @internal */
 export interface TelegramDeliveryRuntimeDeps extends TelegramDeliveryTargetResolverDeps {
@@ -98,6 +99,7 @@ export interface TelegramBridgeDeliveryRuntimeDeps {
     getTargetPolicyView: () => TelegramDeliveryTargetPolicyView;
     getActiveTurnTarget: () => TelegramDeliveryTarget | undefined;
     isTransportActive?: () => boolean;
+    getCompletionEffectId?: () => string | undefined;
     api: Pick<TelegramBridgeApiRuntime, "sendMessage" | "sendRichMessage" | "editMessageText" | "deleteMessage" | "sendChatAction">;
     recordOwnership: (input: {
         chatId: number;

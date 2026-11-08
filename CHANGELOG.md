@@ -4,6 +4,13 @@
 
 ## Unreleased
 
+- `Markdown lists`: Bullets and numbered items now render as plain `•` and `1.` text instead of inline code chips, so lists stay readable on a phone screen.
+- `Headings`: `#`, `##` and `###` now render as three distinct levels (`bold+underline`, `bold`, `bold italic`) instead of identical bold text, all using tags the Bot API documents as supported.
+- `Long quotes`: A block quote longer than three lines becomes `<blockquote expandable>`, so it collapses until tapped instead of pushing the rest of the answer off screen.
+- `Activity labels`: The collapsible tool rows now read `Args` / `Result` / `Error` instead of Chinese labels, matching the tool-call vocabulary the rest of the panel uses.
+- `Date-time entity`: Writing `{{time:2026-12-06T09:00:00+08:00}}` now renders as a Telegram `<tg-time>` entity, so each reader sees their own local date, time and weekday; unparsable values stay as literal text.
+- `Completion effect`: The final reply of a turn now carries a Telegram message effect (`🎉`, id `5046509860389126442`) in private chats, so a finished answer lands with a small celebration. Set `assistant.completionEffect` to `false` to turn it off, or to another effect id to change it.
+
 ## 0.54.3: One routing tab on mobile
 
 - `Mobile routing tab`: Sending a command or prompt from `All` in mobile Telegram no longer leaves an extra tab named after the input. The mobile client creates that native tab itself before delivering the input to `All`; the bridge now adopts it as the routing tab and renames it, instead of creating a second tab beside it. Desktop behavior is unchanged.

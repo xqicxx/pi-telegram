@@ -83,7 +83,7 @@ test("Malformed and boundary markdown renders safely", () => {
     for (const chunk of chunks) {
       assert.ok(chunk.text.length <= MAX_MESSAGE_LENGTH);
       assert.equal(
-        countMatches(chunk.text, /<blockquote>/g),
+        countMatches(chunk.text, /<blockquote(?: expandable)?>/g),
         countMatches(chunk.text, /<\/blockquote>/g),
       );
       assert.equal(
@@ -114,7 +114,7 @@ test("Nested lists stay out of code blocks", () => {
   );
   assert.equal(
     chunks.some((chunk) =>
-      chunk.text.includes("<code>-</code> Level 3 with <b>bold</b> text"),
+      chunk.text.includes("• Level 3 with <b>bold</b> text"),
     ),
     true,
   );
@@ -173,7 +173,7 @@ test("Quoted nested lists stay in blockquote rendering", () => {
   assert.equal(chunks.length, 1);
   assert.match(chunks[0]?.text ?? "", /<blockquote>/);
   assert.match(chunks[0]?.text ?? "", /nested item/);
-  assert.match(chunks[0]?.text ?? "", /<code>-<\/code> nested item/);
+  assert.match(chunks[0]?.text ?? "", /• nested item/);
   assert.equal((chunks[0]?.text ?? "").includes("<pre><code>"), false);
 });
 
@@ -182,8 +182,8 @@ test("Numbered lists use monospace numeric markers", () => {
     mode: "markdown",
   });
   assert.equal(chunks.length, 1);
-  assert.match(chunks[0]?.text ?? "", /<code>1\.<\/code> first/);
-  assert.match(chunks[0]?.text ?? "", /<code>2\.<\/code> second/);
+  assert.match(chunks[0]?.text ?? "", /1\. first/);
+  assert.match(chunks[0]?.text ?? "", /2\. second/);
 });
 
 test("Ordered task lists preserve numeric markers in rendering", () => {
@@ -194,11 +194,11 @@ test("Ordered task lists preserve numeric markers in rendering", () => {
   assert.equal(chunks.length, 1);
   assert.match(
     chunks[0]?.text ?? "",
-    /<code>1\.<\/code> <code>\[x\]<\/code> first/,
+    /1\. \[x\] first/,
   );
   assert.match(
     chunks[0]?.text ?? "",
-    /<code>2\.<\/code> <code>\[ \]<\/code> second/,
+    /2\. \[ \] second/,
   );
 });
 
@@ -210,11 +210,11 @@ test("Leading indentation on the first markdown line stays intact", () => {
   assert.equal(chunks.length, 1);
   assert.match(
     chunks[0]?.text ?? "",
-    /^\u00A0\u00A0<code>-<\/code> nested bullet/m,
+    /^\u00A0\u00A0• nested bullet/m,
   );
   assert.match(
     chunks[0]?.text ?? "",
-    /^\u00A0\u00A0\u00A0\u00A0<code>-<\/code> nested child/m,
+    /^\u00A0\u00A0\u00A0\u00A0• nested child/m,
   );
 });
 
@@ -226,7 +226,7 @@ test("UI/compat rendering preserves multiple blank lines between blocks", () => 
   assert.equal(chunks.length, 1);
   assert.match(
     chunks[0]?.text ?? "",
-    /<b>Title<\/b>\n\n\nParagraph\n\n\n<blockquote>Quote<\/blockquote>/,
+    /<b><u>Title<\/u><\/b>\n\n\nParagraph\n\n\n<blockquote>Quote<\/blockquote>/,
   );
 });
 
@@ -244,7 +244,7 @@ test("UI/compat rendering preserves original blank-line spacing across block tra
     },
     {
       markdown: "Para\n\n\n- item",
-      finalText: "Para\n\n\n<code>-</code> item",
+      finalText: "Para\n\n\n• item",
     },
     {
       markdown: "Para\n\n\n> Quote",
@@ -268,7 +268,7 @@ test("Headings keep visible spacing before following code blocks even without so
   assert.equal(chunks.length, 1);
   assert.match(
     chunks[0]?.text ?? "",
-    /<b>Title<\/b>\n\n<pre><code class="language-ts">const x = 1<\/code><\/pre>/,
+    /<b><i>Title<\/i><\/b>\n\n<pre><code class="language-ts">const x = 1<\/code><\/pre>/,
   );
 });
 
@@ -289,7 +289,7 @@ test("Nested blockquotes flatten into one Telegram blockquote with indentation",
     mode: "markdown",
   });
   assert.equal(chunks.length, 1);
-  assert.equal((chunks[0]?.text.match(/<blockquote>/g) ?? []).length, 1);
+  assert.equal((chunks[0]?.text.match(/<blockquote(?: expandable)?>/g) ?? []).length, 1);
   assert.equal((chunks[0]?.text.match(/<\/blockquote>/g) ?? []).length, 1);
   assert.match(chunks[0]?.text ?? "", /outer/);
   assert.match(chunks[0]?.text ?? "", /\u00A0\u00A0inner/);
@@ -388,7 +388,7 @@ test("HTML mode keeps tags balanced across long chunk boundaries", () => {
     assert.equal(chunk.parseMode, "HTML");
     assert.ok(chunk.text.length <= MAX_MESSAGE_LENGTH);
     assert.equal(
-      (chunk.text.match(/<blockquote>/g) ?? []).length,
+      (chunk.text.match(/<blockquote(?: expandable)?>/g) ?? []).length,
       (chunk.text.match(/<\/blockquote>/g) ?? []).length,
     );
     assert.equal(
@@ -454,7 +454,7 @@ test("Long quoted blocks stay chunked with balanced blockquote tags", () => {
   for (const chunk of chunks) {
     assert.ok(chunk.text.length <= MAX_MESSAGE_LENGTH);
     assert.equal(
-      (chunk.text.match(/<blockquote>/g) ?? []).length,
+      (chunk.text.match(/<blockquote(?: expandable)?>/g) ?? []).length,
       (chunk.text.match(/<\/blockquote>/g) ?? []).length,
     );
   }
@@ -520,7 +520,7 @@ test("Long multi-block markdown keeps quotes and code fences structurally balanc
   for (const chunk of chunks) {
     assert.ok(chunk.text.length <= MAX_MESSAGE_LENGTH);
     assert.equal(
-      (chunk.text.match(/<blockquote>/g) ?? []).length,
+      (chunk.text.match(/<blockquote(?: expandable)?>/g) ?? []).length,
       (chunk.text.match(/<\/blockquote>/g) ?? []).length,
     );
     assert.equal(
@@ -546,7 +546,7 @@ test("Chunked mixed block transitions keep quote and list structure balanced", (
   for (const chunk of chunks) {
     assert.ok(chunk.text.length <= MAX_MESSAGE_LENGTH);
     assert.equal(
-      (chunk.text.match(/<blockquote>/g) ?? []).length,
+      (chunk.text.match(/<blockquote(?: expandable)?>/g) ?? []).length,
       (chunk.text.match(/<\/blockquote>/g) ?? []).length,
     );
     assert.equal(
@@ -658,7 +658,7 @@ test("Realistic Markdown fixtures render safely for UI/compat surfaces", () => {
         countMatches(chunk.text, /<\/a>/g),
       );
       assert.equal(
-        countMatches(chunk.text, /<blockquote>/g),
+        countMatches(chunk.text, /<blockquote(?: expandable)?>/g),
         countMatches(chunk.text, /<\/blockquote>/g),
       );
       assert.equal(
@@ -692,7 +692,7 @@ test("Chunked list, code, quote, and prose cycles stay balanced across transitio
       (chunk.text.match(/<\/code><\/pre>/g) ?? []).length,
     );
     assert.equal(
-      (chunk.text.match(/<blockquote>/g) ?? []).length,
+      (chunk.text.match(/<blockquote(?: expandable)?>/g) ?? []).length,
       (chunk.text.match(/<\/blockquote>/g) ?? []).length,
     );
     assert.equal(
@@ -700,4 +700,16 @@ test("Chunked list, code, quote, and prose cycles stay balanced across transitio
       (chunk.text.match(/<\/a>/g) ?? []).length,
     );
   }
+});
+
+test("{{time:...}} renders a Telegram date-time entity and leaves junk literal", () => {
+  const chunks = renderTelegramMessage("考试：{{time:2026-12-06T09:00:00+08:00}} 开考", {
+    mode: "markdown",
+  });
+  const text = chunks[0]?.text ?? "";
+  assert.match(text, /<tg-time unix="\d{9,11}" format="wDT">/);
+  assert.match(text, /开考/);
+
+  const invalid = renderTelegramMessage("{{time:not-a-date}}", { mode: "markdown" });
+  assert.match(invalid[0]?.text ?? "", /\{\{time:not-a-date\}\}/);
 });

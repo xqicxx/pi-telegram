@@ -59,6 +59,8 @@ export interface TelegramConfig {
         rendering?: TelegramAssistantRenderingMode;
         activity?: TelegramActivityVerbosity;
         timeInjection?: TelegramTimeMode;
+        /** Send a message effect on the final reply of a turn. true = celebration, string = effect id, false = off. */
+        completionEffect?: boolean | string;
         /** @deprecated use activity */
         activityVerbosity?: TelegramActivityVerbosity;
     };
@@ -159,6 +161,8 @@ export declare function normalizeTelegramDefaultProfileConfig(config: TelegramCo
     changed: boolean;
 };
 export declare function createTelegramConfigStore(options?: TelegramConfigStoreOptions): TelegramConfigStore;
+export declare const TELEGRAM_COMPLETION_EFFECT_CELEBRATION = "5046509860389126442";
+export declare function createTelegramCompletionEffectIdGetter(configStore: Pick<TelegramConfigStore, "get">): () => string | undefined;
 export declare function createTelegramVoiceReplyModeGetter(configStore: Pick<TelegramConfigStore, "get">): () => "manual" | "mirror" | "always";
 export declare function createTelegramVoiceReplyModeConfiguredChecker(configStore: Pick<TelegramConfigStore, "get">): () => boolean;
 export declare function createTelegramVoiceReplyModeSetter(configStore: TelegramMutableConfigStore): (replyMode: "manual" | "hidden" | "mirror" | "always" | undefined) => Promise<void>;

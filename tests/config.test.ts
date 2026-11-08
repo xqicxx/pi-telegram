@@ -32,6 +32,7 @@ import {
   resolveTelegramBotToken,
   createTelegramActiveProfileKeyGetter,
   createTelegramConfigBotIdGetter,
+  createTelegramCompletionEffectIdGetter,
   createTelegramConfigControls,
   createTelegramConfigStore,
   createTelegramProactivePushTargetGetter,
@@ -1925,4 +1926,17 @@ test("Pairing admission hashes the resolved token reference", async () => {
   } finally {
     await rm(agentDir, { recursive: true, force: true });
   }
+});
+
+test("completionEffect defaults to the celebration effect, can be overridden or disabled", () => {
+  const resolve = (completionEffect?: boolean | string) =>
+    createTelegramCompletionEffectIdGetter({
+      get: () => ({ assistant: { completionEffect } }) as never,
+    })();
+
+  assert.equal(resolve(undefined), "5046509860389126442");
+  assert.equal(resolve(true), "5046509860389126442");
+  assert.equal(resolve("5159385139981059251"), "5159385139981059251");
+  assert.equal(resolve("  "), "5046509860389126442");
+  assert.equal(resolve(false), undefined);
 });

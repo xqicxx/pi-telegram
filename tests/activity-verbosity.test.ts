@@ -398,7 +398,7 @@ test("tool Rich activity separates arguments, updates, and result details", () =
       summary: [
         { type: "bold", text: "Bash:" },
         " ",
-        { type: "code", text: "完成" },
+        { type: "code", text: "Done" },
         " ",
         // A collapsed row still names its subject (first string argument).
         { type: "code", text: "npm test" },
@@ -406,7 +406,7 @@ test("tool Rich activity separates arguments, updates, and result details", () =
       blocks: [
         {
           type: "details",
-          summary: { type: "code", text: "参数" },
+          summary: { type: "code", text: "Args" },
           blocks: [
             {
               type: "pre",
@@ -427,7 +427,7 @@ test("tool Rich activity separates arguments, updates, and result details", () =
         },
         {
           type: "details",
-          summary: { type: "code", text: "结果" },
+          summary: { type: "code", text: "Result" },
           blocks: [
             { type: "pre", text: '{\n  "ok": true\n}', language: "json" },
           ],
@@ -482,7 +482,7 @@ test("tool evidence renders as ordinary expandable HTML fallback", () => {
     },
   ]);
 
-  assert.match(html, /^<b>Exec&lt;script&gt;:<\/b> <code>完成<\/code>/);
+  assert.match(html, /^<b>Exec&lt;script&gt;:<\/b> <code>Done<\/code>/);
   assert.match(html, /<blockquote expandable>/);
   assert.match(html, /"arguments": \{\n {2}"command"/);
   assert.equal(html.includes("https://\u200bexample.com/result"), true);
@@ -511,8 +511,8 @@ test("tool evidence renders as ordinary expandable HTML fallback", () => {
       complete: true,
     },
   ]);
-  assert.match(statuses, /<code>运行中<\/code>/);
-  assert.match(statuses, /<code>失败<\/code>/);
+  assert.match(statuses, /<code>Running<\/code>/);
+  assert.match(statuses, /<code>Failed<\/code>/);
 });
 
 test("known-safe Rich rejection falls back to the HTML tool message", async () => {
@@ -573,21 +573,21 @@ test("reasoning uses a persistent collapsed disclosure message", async () => {
   });
   assert.match(
     JSON.stringify(harness.richSends[0]?.rich_message),
-    /🧠 思考中/,
+    /🧠 Thinking/,
   );
   assert.equal(harness.edits.length, 2);
   assert.equal(harness.edits[0]?.text, undefined);
   const digest = JSON.stringify(harness.edits[1]?.rich_message);
   assert.match(digest, /🧠 思考/);
   // Short reasoning fits on one line: no disclosure, the text itself stays visible.
-  assert.doesNotMatch(digest, /展开全文/);
+  assert.doesNotMatch(digest, /Show full output/);
   assert.match(digest, /Checking \*\*state\*\*/);
-  assert.doesNotMatch(digest, /🧠 思考中…/);
+  assert.doesNotMatch(digest, /🧠 Thinking…/);
   assert.deepEqual(harness.edits[0]?.rich_message?.blocks, [
     {
       type: "paragraph",
       text: [
-        { type: "bold", text: "🧠 思考中…" },
+        { type: "bold", text: "🧠 Thinking…" },
         " ",
         { type: "code", text: "18 字" },
       ],
@@ -612,13 +612,13 @@ test("reasoning uses a persistent collapsed disclosure message", async () => {
   assert.equal(harness.richSends.length, 1);
   assert.equal(harness.edits.length, 1);
   const serialized = JSON.stringify(harness.richSends[0]?.rich_message);
-  assert.match(serialized, /🧠 思考中/);
+  assert.match(serialized, /🧠 Thinking/);
   assert.match(serialized, /still thinking/);
 
   const fold = harness.edits[0];
   assert.equal(fold?.text, undefined);
   assert.match(JSON.stringify(fold?.rich_message), /still thinking/);
-  assert.doesNotMatch(JSON.stringify(fold?.rich_message), /展开全文/);
+  assert.doesNotMatch(JSON.stringify(fold?.rich_message), /Show full output/);
   assert.deepEqual(fold?.reply_markup, undefined);
 });
 
@@ -643,7 +643,7 @@ test("agent start refreshes file-backed mode before activity isolation", async (
   );
   await harness.runtime.waitForIdle();
   const activity = JSON.stringify([harness.sends, harness.richSends]);
-  assert.equal(activity.includes("🧠 思考中"), true);
+  assert.equal(activity.includes("🧠 Thinking"), true);
   assert.equal(activity.includes("Read:"), false);
 });
 
@@ -688,7 +688,7 @@ test("thinking and tools modes isolate their activity classes", async () => {
     );
     await harness.runtime.waitForIdle();
     const activity = JSON.stringify([harness.sends, harness.richSends]);
-    assert.equal(activity.includes("🧠 思考中"), mode === "thinking");
+    assert.equal(activity.includes("🧠 Thinking"), mode === "thinking");
     assert.equal(activity.includes("Read:"), mode === "tools");
   }
 });
@@ -696,14 +696,14 @@ test("thinking and tools modes isolate their activity classes", async () => {
 test("reasoning keeps its label on its own line above a collapsed body", () => {
   const text = "**Reviewing data models**\na < b\n<https://example.com>";
   assert.deepEqual(renderTelegramThinkingRichBlocks(text), [
-    { type: "paragraph", text: [{ type: "bold", text: "🧠 思考中…" }] },
+    { type: "paragraph", text: [{ type: "bold", text: "🧠 Thinking…" }] },
     {
       type: "paragraph",
       text: "**Reviewing data models** a < b <https://example.com> ▍",
     },
     {
       type: "details",
-      summary: "展开全文",
+      summary: "Show full output",
       blocks: [{ type: "pre", text }],
     },
   ]);
@@ -734,7 +734,7 @@ test("turn-end digest folds the card and reports size, duration, and tools", () 
   );
 });
 
-test("a 收起 request folds the card through the live runtime", async () => {
+test("a Collapse request folds the card through the live runtime", async () => {
   const harness = createHarness({ mode: "thinking" });
   harness.runtime.accept(event(1, { type: "agent-start" }));
   harness.runtime.accept(
@@ -867,11 +867,11 @@ test("tool Rich details keep compact arrays of objects", async () => {
   await harness.runtime.waitForIdle();
 
   const rich = JSON.stringify(harness.richSends[0]?.rich_message);
-  assert.match(rich, /参数/);
+  assert.match(rich, /Args/);
   assert.match(rich, /更新 1/);
-  assert.match(rich, /结果/);
+  assert.match(rich, /Result/);
   assert.match(rich, /\\"content\\":\s*\[/);
-  assert.match(rich, /结果/);
+  assert.match(rich, /Result/);
 });
 
 test("assistant boundaries, capacity, and authority replacement fence batches", async () => {
@@ -1014,7 +1014,7 @@ test("reasoning and tool updates retain bounded latest evidence", async () => {
   const rich = harness.richSends.map((body) =>
     JSON.stringify(body.rich_message),
   );
-  const reasoning = rich.find((body) => body.includes("🧠 思考中")) ?? "";
+  const reasoning = rich.find((body) => body.includes("🧠 Thinking")) ?? "";
   assert.doesNotMatch(reasoning, /earlier chars omitted/);
   assert.match(reasoning, /latest-marker/);
   assert.doesNotMatch(reasoning, /old-marker/);
@@ -1072,7 +1072,7 @@ test("reasoning edits are throttled to a minimum interval between frames", async
     event(6, {
       type: "reasoning-end",
       contentIndex: 0,
-      text: "完成",
+      text: "Done",
     }),
   );
   await harness.runtime.waitForIdle();
@@ -1100,7 +1100,7 @@ test("reset drops accepted events that have not started processing", async () =>
       return { message_id: 1 };
     },
     async sendRichMessage(body) {
-      if (JSON.stringify(body.rich_message).includes("🧠 思考中")) {
+      if (JSON.stringify(body.rich_message).includes("🧠 Thinking")) {
         await reasoningBlocked;
       }
       richSends.push(body);
@@ -1167,7 +1167,7 @@ test("Thinking card bounds the expanded body and offers the full text", () => {
     json.includes(`${TELEGRAM_THINKING_FULL_CALLBACK_PREFIX}42`),
     "full-text button wired",
   );
-  assert.ok(json.includes("收起"), "fold control unchanged");
+  assert.ok(json.includes("Collapse"), "fold control unchanged");
 });
 test("each thinking segment reports its own duration, not the whole turn", async () => {
   const harness = createHarness({ mode: "thinking" });

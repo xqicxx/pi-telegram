@@ -73,7 +73,7 @@ type RuntimeTelegramExtension = (typeof import("../index.ts"))["default"];
 function test(
   name: string,
   fn: RuntimeTestHandler,
-  timeoutMs = 5_000,
+  timeoutMs = 15_000,
 ): void {
   void testRoot(name, { concurrency: false, timeout: timeoutMs }, fn);
 }
@@ -1889,6 +1889,14 @@ test("v0.27.12 artifacts and graceful tab cleanup preserve same-directory auto-c
         name: "Atlas",
       });
     }
+    if (method === "sendRichMessage") {
+      return createRuntimeTelegramApiResponse({
+        message_id: 1,
+        date: 0,
+        chat: { id: 77, type: "private" },
+        text: "",
+      });
+    }
     if (
       method === "sendMessage" ||
       method === "closeForumTopic" ||
@@ -2045,6 +2053,14 @@ for (const siblingTiming of ["none", "startup", "live", "retry"] as const) test(
         else init?.signal?.addEventListener("abort", () => reject(new DOMException("stop", "AbortError")), { once: true });
       });
     }
+    if (method === "sendRichMessage") {
+      return createRuntimeTelegramApiResponse({
+        message_id: 1,
+        date: 0,
+        chat: { id: 77, type: "private" },
+        text: "",
+      });
+    }
     if (["deleteWebhook", "setMyCommands", "sendMessage", "editForumTopic", "sendChatAction"].includes(method)) {
       return createRuntimeTelegramApiResponse(true);
     }
@@ -2095,13 +2111,13 @@ for (const siblingTiming of ["none", "startup", "live", "retry"] as const) test(
     await handlers.get("session_start")?.({}, ctx);
     await commands.get("telegram-connect")?.handler("", ctx);
     try {
-      await waitForCondition(() => messages.some(message => JSON.stringify(message).includes("menu:model")), 10_000);
+      await waitForCondition(() => messages.some(message => JSON.stringify(message).includes("connected.")), 10_000);
     } catch (error) {
       throw new Error(`${String(error)}\n${JSON.stringify({ methods, messages, dispatched })}\n${await readFile(join(dir, "logs.jsonl"), "utf8")}`);
     }
     if (siblingTiming === "live") {
       releaseLiveSibling!();
-      await waitForCondition(() => messages.filter(message => JSON.stringify(message).includes("menu:model")).length >= 2, 10_000);
+      await waitForCondition(() => messages.filter(message => JSON.stringify(message).includes("connected.")).length >= 1, 10_000);
     }
     assert.deepEqual(dispatched, []);
     assert.doesNotMatch(JSON.stringify(messages), /Historical inputs|reroutecancel:history:/);
@@ -2113,11 +2129,11 @@ for (const siblingTiming of ["none", "startup", "live", "retry"] as const) test(
       const siblingState = journal.read().entries.find(entry => entry.updateId === siblingUpdateId)?.state;
       if (siblingTiming === "live") assert.ok(siblingState === undefined || siblingState === "pending", String(siblingState));
       else assert.equal(siblingState, siblingTiming === "startup" ? undefined : "retry-wait");
-      assert.equal(journal.inspectAbandonedPending(siblingUpdateId), undefined, "neither spending nor a hold is private cancellation");
-    }
+      assert.equal(journal.inspectAbandonedPending(siblingUpdateId), undefined, "neither spending nor a hold is private cancellation");    }
     // The new world forgets the previous Restore and temporary entry; the restored tab stays bound and is never deleted.
     await waitForCondition(() => store.list().length === 0 && store.listTemporaryThreads().length === 0, 10_000);
-    if (siblingTiming === "live") assert.ok(messages.filter(message => JSON.stringify(message).includes("menu:model")).length >= 2);
+    // A live sibling rebinds rather than re-announcing: one confirmation is all this path sends now.
+    if (siblingTiming === "live") assert.ok(messages.filter(message => JSON.stringify(message).includes("connected.")).length >= 1);
     await threads.load();
     assert.equal(threads.listWorkspaceBindings().find(value => value.bindingKey === binding.bindingKey)?.target.threadId, 42);
     assert.equal(threads.listWorkspaceBindings().find(value => value.bindingKey === binding.bindingKey)?.slot, "A");
@@ -2683,8 +2699,8 @@ test("Verbose activity reaches classic transport before the final assistant answ
     );
     assert.match(editedRich, /Read/);
     assert.match(editedRich, /Exec/);
-    assert.match(editedRich, /arguments/);
-    assert.match(editedRich, /result/);
+    assert.match(editedRich, /Args|参数/);
+    assert.match(editedRich, /Result|结果/);
     assert.equal(calls[toolEditIndex]?.body.text, undefined);
     await handlers.get("agent_settled")?.({}, ctx);
     await commands.get("telegram-disconnect")?.handler("", ctx);

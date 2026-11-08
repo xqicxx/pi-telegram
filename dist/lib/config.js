@@ -628,6 +628,17 @@ function createTelegramAssistantRenderingModeSetter(configStore) {
         await configStore.persist(config);
     };
 }
+export const TELEGRAM_COMPLETION_EFFECT_CELEBRATION = "5046509860389126442";
+export function createTelegramCompletionEffectIdGetter(configStore) {
+    return () => {
+        const value = configStore.get().assistant?.completionEffect;
+        if (value === false)
+            return undefined;
+        if (typeof value === "string" && value.trim().length > 0)
+            return value.trim();
+        return TELEGRAM_COMPLETION_EFFECT_CELEBRATION;
+    };
+}
 function createTelegramActivityVerbosityGetter(configStore) {
     return () => {
         const assistant = configStore.get().assistant;

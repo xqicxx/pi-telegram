@@ -141,6 +141,7 @@ export interface TelegramDeliveryRenderedChunk {
 export interface TelegramDeliveryTransportOptions {
   replyToMessageId?: number;
   replyMarkup?: TelegramReplyMarkup | null;
+  isLast?: boolean;
 }
 
 /** @internal */
@@ -182,6 +183,7 @@ export interface TelegramBridgeDeliveryRuntimeDeps {
   getTargetPolicyView: () => TelegramDeliveryTargetPolicyView;
   getActiveTurnTarget: () => TelegramDeliveryTarget | undefined;
   isTransportActive?: () => boolean;
+  getCompletionEffectId?: () => string | undefined;
   api: Pick<
     TelegramBridgeApiRuntime,
     | "sendMessage"
@@ -481,6 +483,7 @@ function getChunkTransportOptions(
   const isFirst = index === 0;
   const isLast = index === chunkCount - 1;
   return {
+    isLast,
     ...(isFirst && replyToMessageId !== undefined ? { replyToMessageId } : {}),
     ...(isLast
       ? { replyMarkup: view.replyMarkup ?? (editing ? null : undefined) }
@@ -807,9 +810,14 @@ export function createTelegramBridgeDeliveryRuntime(
               ...markup,
             });
           }
+          const effectId =
+            options.isLast && target.chatId > 0
+              ? deps.getCompletionEffectId?.()
+              : undefined;
           const body = {
             chat_id: target.chatId,
             text: chunk.text,
+            ...(effectId ? { message_effect_id: effectId } : {}),
             ...(chunk.parseMode === "html"
               ? { parse_mode: "HTML" as const }
               : {}),

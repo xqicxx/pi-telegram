@@ -669,6 +669,7 @@ export default function (pi) {
         getTransportStamp: telegramTransportStampRuntime.getStamp,
         isTransportStampActive: telegramTransportStampRuntime.isActive,
         getActiveTurnTarget: deliveryTargetPolicyRuntime.getActiveTurnTarget,
+        getCompletionEffectId: Config.createTelegramCompletionEffectIdGetter(configStore),
         api: telegramApiRuntime,
         recordOwnership: messageOwnershipRuntime.recordLocal,
         recordFailure(operation, error, target) {
